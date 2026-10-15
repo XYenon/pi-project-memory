@@ -1,0 +1,82 @@
+{
+  "name": "pi-project-memory",
+  "version": "0.1.0",
+  "description": "Local project auto-memory extension for Pi",
+  "author": {
+    "name": "XYenon",
+    "email": "i@xyenon.bid",
+    "url": "https://github.com/XYenon"
+  },
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/XYenon/pi-project-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/XYenon/pi-project-memory/issues"
+  },
+  "homepage": "https://github.com/XYenon/pi-project-memory#readme",
+  "main": "index.ts",
+  "files": [
+    "config.example.json",
+    "docs",
+    "index.ts",
+    "LICENSE",
+    "src"
+  ],
+  "scripts": {
+    "lint": "biome lint . --error-on-warnings && markdownlint-cli2 \"**/*.md\"",
+    "lint:fix": "biome lint . --write && markdownlint-cli2 --fix \"**/*.md\"",
+    "format": "biome format . --write && prettier --write \"**/*.md\"",
+    "format:check": "biome format . && prettier --check \"**/*.md\"",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import=tsx --test tests/*.test.ts",
+    "check": "biome check . --error-on-warnings && markdownlint-cli2 \"**/*.md\" && prettier --check \"**/*.md\" && pnpm typecheck && pnpm test"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "memory",
+    "project-memory",
+    "auto-memory",
+    "claude-code"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@earendil-works/pi-agent-core": "^1.2.0",
+    "@earendil-works/pi-ai": "^1.2.0",
+    "@earendil-works/pi-coding-agent": "^1.2.0",
+    "@types/node": "^26.6.5",
+    "markdownlint-cli2": "^0.23.3",
+    "prettier": "^3.9.10",
+    "tsx": "^4.23.15",
+    "typebox": "^1.3.37",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "fast-glob": "^3.3.3",
+    "tree-sitter": "^0.25.1",
+    "tree-sitter-bash": "^0.25.1",
+    "yaml": "^2.9.1"
+  }
+}

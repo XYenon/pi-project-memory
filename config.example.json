@@ -1,0 +1,36 @@
+{
+  "enabled": true,
+  "autoMemoryDirectory": null,
+  "models": {
+    "selector": {
+      "model": "inherit",
+      "thinkingLevel": "off",
+      "maxTokens": 512,
+      "structuredOutput": true
+    },
+    "extractor": {
+      "model": "inherit",
+      "thinkingLevel": "low",
+      "maxTokens": "inherit"
+    },
+    "dream": {
+      "model": "inherit",
+      "thinkingLevel": "medium",
+      "maxTokens": "inherit"
+    }
+  },
+  "extraction": {
+    "enabled": true,
+    "everyNTurns": 1,
+    "idleFlushSeconds": 120,
+    "maxTurns": 5,
+    "recentMessages": "inherit"
+  },
+  "dream": {
+    "enabled": true,
+    "minimumHours": 24,
+    "minimumOtherSessions": 5,
+    "scanThrottleSeconds": 600,
+    "maxTurns": 50
+  }
+}
