@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after, before } from "node:test";
 import { promisify } from "node:util";
 import {
 	containsVcsMetadataSegment,
@@ -13,6 +14,19 @@ import {
 import { createTempDirectory } from "./helpers.ts";
 
 const execFileAsync = promisify(execFile);
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+let isolatedAgentDir: string;
+
+before(async () => {
+	isolatedAgentDir = await mkdtemp(join(tmpdir(), "pi-memory-path-tests-agent-"));
+	process.env.PI_CODING_AGENT_DIR = isolatedAgentDir;
+});
+
+after(async () => {
+	if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+	await rm(isolatedAgentDir, { recursive: true, force: true });
+});
 
 test("VCS metadata detection uses exact path segments", () => {
 	for (const path of [".git/config", "nested/.hg/store", "a/.SVN/entries", ".bzr/x", ".jj/x", ".sl/x"])
@@ -25,6 +39,7 @@ test("autoMemoryDirectory accepts safe paths and falls back for invalid override
 	const root = await createTempDirectory(t, "pi-memory-paths-");
 	const override = join(root, "custom-memory");
 	const paths = await resolveProjectPaths(root, override);
+	assert.ok(paths.namespaceDir?.startsWith(join(isolatedAgentDir, "project-memory", "projects")));
 	assert.equal(paths.memoryDir, override);
 	for (const invalid of [
 		"relative-memory",
