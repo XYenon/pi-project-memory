@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, runToolCall, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	type Api,
 	type AssistantMessage,
 	clampThinkingLevel,
+	getCurrentTools,
 	type Message,
 	type Model,
 	type Tool,
@@ -172,8 +174,12 @@ function responseSelectorJson(message: AssistantMessage): string {
 	return call?.type === "toolCall" ? JSON.stringify(call.arguments) : responseText(message);
 }
 
-export function effectiveThinkingLevel(model: Model<Api>, configured: ThinkingLevel): ThinkingLevel {
-	return clampThinkingLevel(model, configured);
+export function effectiveThinkingLevel(
+	model: Model<Api>,
+	configured: RoleModelConfig["thinkingLevel"],
+	inherited: ThinkingLevel = "off",
+): ThinkingLevel {
+	return clampThinkingLevel(model, configured === "inherit" ? inherited : configured);
 }
 
 function reasoning(level: ThinkingLevel): Exclude<ThinkingLevel, "off"> | undefined {
@@ -315,8 +321,8 @@ async function requestSelector(options: {
 	const reasoningLevel = reasoning(thinkingLevel);
 	const stream = ctx.modelRegistry.streamSimple(model, context, {
 		...(roleConfig.maxTokens === "inherit" ? {} : { maxTokens: roleConfig.maxTokens }),
-		cacheRetention: "none",
-		sessionId: randomUUID(),
+		cacheRetention: "short",
+		sessionId: `${ctx.sessionManager.getSessionId()}/selector`,
 		...(reasoningLevel ? { reasoning: reasoningLevel } : {}),
 		...((signal ?? ctx.signal) ? { signal: signal ?? ctx.signal } : {}),
 		...(mode === "output-format" ? { onPayload: applySelectorOutputSchema } : {}),
@@ -345,12 +351,12 @@ export async function selectRelevantMemories(
 	if (candidates.length === 0) return [];
 	const roleConfig = config.models.selector;
 	const model = resolveRoleModel("selector", roleConfig, ctx);
-	const thinkingLevel = effectiveThinkingLevel(model, roleConfig.thinkingLevel);
+	const thinkingLevel = effectiveThinkingLevel(model, roleConfig.thinkingLevel, ctx.thinkingLevel);
 	const selectorQuery = `Select memories relevant to:\n${query}`;
 	const messages: Message[] = [
 		{
 			role: "user",
-			content: [{ type: "text", text: `Available memories:\n${selectorCatalogMessage(candidates)}` }],
+			content: [{ type: "text", text: `Available memories:\n${selectorCatalogMessage(topics)}` }],
 			timestamp: Date.now(),
 		},
 		...history.flatMap((entry): Message[] => [
@@ -487,11 +493,18 @@ export function addUsage(total: Usage, usage: Partial<Usage>): void {
 		total.cost[key] += usage.cost?.[key] ?? 0;
 }
 
+export interface ParentMemoryContext {
+	model: Model<Api>;
+	messages: Message[];
+	sessionId: string;
+}
+
 export async function runChildAgent(options: {
 	role: "extractor" | "dream";
 	prompt: string;
 	sourceMessages: Message[];
 	systemPrompt: string;
+	parentContext?: ParentMemoryContext;
 	codemode?: ChildCodemodeOptions;
 	config: ProjectMemoryConfig;
 	paths: ProjectPaths;
@@ -508,6 +521,7 @@ export async function runChildAgent(options: {
 		prompt,
 		sourceMessages,
 		systemPrompt,
+		parentContext,
 		codemode,
 		config,
 		paths,
@@ -521,7 +535,7 @@ export async function runChildAgent(options: {
 	} = options;
 	const roleConfig = config.models[role];
 	const model = resolveRoleModel(role, roleConfig, ctx);
-	const thinkingLevel = effectiveThinkingLevel(model, roleConfig.thinkingLevel);
+	const thinkingLevel = effectiveThinkingLevel(model, roleConfig.thinkingLevel, ctx.thinkingLevel);
 	const reasoningLevel = reasoning(thinkingLevel);
 	const touchedPaths = new Set<string>();
 	const scratchDir = await mkdtemp(join(tmpdir(), "pi-project-memory-"));
@@ -544,10 +558,7 @@ export async function runChildAgent(options: {
 		let turns = 0;
 		const childSessionId = randomUUID();
 		const usage = emptyUsage();
-		const messages: Message[] = [
-			...sanitizeRecentMessages(sourceMessages, Number.POSITIVE_INFINITY, model),
-			{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() },
-		];
+		const messages: Message[] = [];
 		let last: AssistantMessage | undefined;
 		const beforeToolCall = async () => {
 			if (!ctx.isProjectTrusted()) return { block: true, reason: "Project trust was revoked" };
@@ -582,16 +593,43 @@ export async function runChildAgent(options: {
 					scratchDir,
 				)
 			: memoryTools;
-		const effectiveSystemPrompt = `${systemPrompt}\n\n${backgroundToolPrompt(tools, codemode)}`;
+		const fork =
+			parentContext &&
+			parentContext.model.provider === model.provider &&
+			parentContext.model.api === model.api &&
+			parentContext.model.id === model.id &&
+			parentContext.messages[0]?.role === "system" &&
+			getCurrentTools(parentContext.messages).every((declaration) => {
+				const executable = tools.find((tool) => tool.name === declaration.name);
+				return (
+					!executable ||
+					isDeepStrictEqual(
+						JSON.parse(JSON.stringify(executable.parameters)),
+						JSON.parse(JSON.stringify(declaration.parameters)),
+					)
+				);
+			});
+		const toolPrompt = backgroundToolPrompt(tools, codemode);
+		messages.push(
+			...(fork
+				? structuredClone(parentContext.messages)
+				: sanitizeRecentMessages(sourceMessages, Number.POSITIVE_INFINITY, model)),
+			{
+				role: "user",
+				content: [...(fork ? [{ type: "text" as const, text: toolPrompt }] : []), { type: "text", text: prompt }],
+				timestamp: Date.now(),
+			},
+		);
+		const effectiveSystemPrompt = `${systemPrompt}\n\n${toolPrompt}`;
 		while (turns < maxTurns) {
 			if (signal?.aborted) break;
 			const stream = ctx.modelRegistry.streamSimple(
 				model,
-				{ systemPrompt: effectiveSystemPrompt, messages: [...messages], tools },
+				fork ? { messages: [...messages] } : { systemPrompt: effectiveSystemPrompt, messages: [...messages], tools },
 				{
 					...(roleConfig.maxTokens === "inherit" ? {} : { maxTokens: roleConfig.maxTokens }),
-					cacheRetention: "none",
-					sessionId: childSessionId,
+					cacheRetention: "short",
+					sessionId: fork ? parentContext.sessionId : childSessionId,
 					...(reasoningLevel ? { reasoning: reasoningLevel } : {}),
 					...(signal ? { signal } : {}),
 				},

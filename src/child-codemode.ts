@@ -75,7 +75,7 @@ export function createChildCodemode(
 export function backgroundToolPrompt(tools: AgentTool[], codemode?: ChildCodemodeOptions): string {
 	return [
 		"## Background memory task tools",
-		"Earlier tool inventories and tool-routing instructions describe the parent session. For this background task, use the tools declared in the current request and their task-specific descriptions below. Continue following inherited user and project instructions and all access restrictions.",
+		"Earlier tool inventories and tool-routing instructions describe the parent session. For this background task, use only the task tools listed below and follow their access restrictions. Other parent tools may remain declared for prompt-cache reuse, but calls to them will be denied. Continue following inherited user and project instructions.",
 		...tools.map((tool) => `- ${tool.name}: ${tool.description}`),
 		...(codemode
 			? [

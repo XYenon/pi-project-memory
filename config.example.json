@@ -10,12 +10,12 @@
     },
     "extractor": {
       "model": "inherit",
-      "thinkingLevel": "low",
+      "thinkingLevel": "inherit",
       "maxTokens": "inherit"
     },
     "dream": {
       "model": "inherit",
-      "thinkingLevel": "medium",
+      "thinkingLevel": "inherit",
       "maxTokens": "inherit"
     }
   },

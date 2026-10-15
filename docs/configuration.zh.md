@@ -45,30 +45,30 @@
 
 下表列出 `config.json` 支持的全部字段、类型、默认值、允许取值范围与单位：
 
-| 字段路径                           | 类型                  | 默认值      | 允许取值与约束                                                                                | 单位                    | 简要作用                                                        |
-| ---------------------------------- | --------------------- | ----------- | --------------------------------------------------------------------------------------------- | ----------------------- | --------------------------------------------------------------- |
-| `enabled`                          | `boolean`             | `true`      | `true` 或 `false`（非布尔值回退为 `true`）                                                    | 无                      | 扩展全局总开关；关闭时不解析或创建目录，不运行任何自动任务。    |
-| `autoMemoryDirectory`              | `string \| null`      | `null`      | `null`，或合法的绝对路径 / `~/` 开头路径（空白字符串或非法路径回退默认）                      | 无                      | 覆盖项目默认的 `memory/` 存储目录（仅下次会话启动生效）。       |
-| `models.selector.model`            | `string`              | `"inherit"` | `"inherit"`，或以第一个 `/` 分隔 `provider` 与非空 `model-id` 的字符串（`model-id` 可含 `/`） | 无                      | Selector（相关记忆挑选）使用的模型。                            |
-| `models.selector.thinkingLevel`    | `string`              | `"off"`     | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"`           | 无                      | Selector 的思考预算档位（会自动夹紧到模型支持的最接近档位）。   |
-| `models.selector.maxTokens`        | `"inherit" \| number` | `512`       | `"inherit"` 或 `64` 到 `65536` 的安全整数                                                     | 输出 token              | Selector 单次调用的最大输出 token 数。                          |
-| `models.selector.structuredOutput` | `boolean`             | `true`      | `true` 或 `false`                                                                             | 无                      | 是否对支持的协议优先使用原生 JSON Schema 输出格式。             |
-| `models.extractor.model`           | `string`              | `"inherit"` | `"inherit"`，或以第一个 `/` 分隔 `provider` 与非空 `model-id` 的字符串（`model-id` 可含 `/`） | 无                      | Extractor（回合后提取）使用的模型。                             |
-| `models.extractor.thinkingLevel`   | `string`              | `"low"`     | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"`           | 无                      | Extractor 的思考预算档位。                                      |
-| `models.extractor.maxTokens`       | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 `64` 到 `65536` 的安全整数                                                     | 输出 token              | Extractor 单次模型请求的最大输出 token 数。                     |
-| `models.dream.model`               | `string`              | `"inherit"` | `"inherit"`，或以第一个 `/` 分隔 `provider` 与非空 `model-id` 的字符串（`model-id` 可含 `/`） | 无                      | Dream（定期整理）使用的模型。                                   |
-| `models.dream.thinkingLevel`       | `string`              | `"medium"`  | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"`           | 无                      | Dream 的思考预算档位。                                          |
-| `models.dream.maxTokens`           | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 `64` 到 `65536` 的安全整数                                                     | 输出 token              | Dream 单次模型请求的最大输出 token 数。                         |
-| `extraction.enabled`               | `boolean`             | `true`      | `true` 或 `false`                                                                             | 无                      | 是否开启自动提取（关闭后仍可手动运行 `/memory extract`）。      |
-| `extraction.everyNTurns`           | `number`              | `1`         | `1` 到 `100` 的安全整数                                                                       | 正常结束的对话轮次      | 每累积多少个已结束轮次（settled turns）运行一次自动提取。       |
-| `extraction.idleFlushSeconds`      | `number`              | `120`       | `0` 到 `86400` 的安全整数（`0` 表示禁用空闲提取）                                             | 秒                      | 轮次未达到 `everyNTurns` 时，空闲多久后自动提取未处理消息。     |
-| `extraction.maxTurns`              | `number`              | `5`         | `1` 到 `8` 的安全整数                                                                         | 子 Agent 工具轮次       | Extractor 单次任务允许的最大模型请求与工具调用循环次数。        |
-| `extraction.recentMessages`        | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 `3` 到 `1000` 的安全整数                                                       | `user`/`assistant` 条数 | 每次提供给 extractor 的最近对话消息上限。                       |
-| `dream.enabled`                    | `boolean`             | `true`      | `true` 或 `false`                                                                             | 无                      | Dream 总开关（关闭后自动整理与手动 `/memory dream` 均不可用）。 |
-| `dream.minimumHours`               | `number`              | `24`        | `1` 到 `8760` 的安全整数                                                                      | 小时                    | 两次自动整理尝试之间的最短间隔时间。                            |
-| `dream.minimumOtherSessions`       | `number`              | `5`         | `1` 到 `1000` 的安全整数                                                                      | 会话数（不含当前会话）  | 上次整理尝试后，至少需要有多少个其他项目会话更新过才触发整理。  |
-| `dream.scanThrottleSeconds`        | `number`              | `600`       | `0` 到 `86400` 的安全整数（`0` 表示不节流）                                                   | 秒                      | 同一进程内满足 `minimumHours` 后扫描会话目录的最短间隔时间。    |
-| `dream.maxTurns`                   | `number`              | `50`        | `1` 到 `50` 的安全整数                                                                        | 子 Agent 工具轮次       | Dream 单次任务允许的最大模型请求与工具调用循环次数。            |
+| 字段路径                           | 类型                  | 默认值      | 允许取值与约束                                                                                     | 单位                    | 简要作用                                                        |
+| ---------------------------------- | --------------------- | ----------- | -------------------------------------------------------------------------------------------------- | ----------------------- | --------------------------------------------------------------- |
+| `enabled`                          | `boolean`             | `true`      | `true` 或 `false`（非布尔值回退为 `true`）                                                         | 无                      | 扩展全局总开关；关闭时不解析或创建目录，不运行任何自动任务。    |
+| `autoMemoryDirectory`              | `string \| null`      | `null`      | `null`，或合法的绝对路径 / `~/` 开头路径（空白字符串或非法路径回退默认）                           | 无                      | 覆盖项目默认的 `memory/` 存储目录（仅下次会话启动生效）。       |
+| `models.selector.model`            | `string`              | `"inherit"` | `"inherit"`，或以第一个 `/` 分隔 `provider` 与非空 `model-id` 的字符串（`model-id` 可含 `/`）      | 无                      | Selector（相关记忆挑选）使用的模型。                            |
+| `models.selector.thinkingLevel`    | `string`              | `"off"`     | `"inherit"` \| `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | 无                      | Selector 的思考预算档位（会自动夹紧到模型支持的最接近档位）。   |
+| `models.selector.maxTokens`        | `"inherit" \| number` | `512`       | `"inherit"` 或 `64` 到 `65536` 的安全整数                                                          | 输出 token              | Selector 单次调用的最大输出 token 数。                          |
+| `models.selector.structuredOutput` | `boolean`             | `true`      | `true` 或 `false`                                                                                  | 无                      | 是否对支持的协议优先使用原生 JSON Schema 输出格式。             |
+| `models.extractor.model`           | `string`              | `"inherit"` | `"inherit"`，或以第一个 `/` 分隔 `provider` 与非空 `model-id` 的字符串（`model-id` 可含 `/`）      | 无                      | Extractor（回合后提取）使用的模型。                             |
+| `models.extractor.thinkingLevel`   | `string`              | `"inherit"` | `"inherit"` \| `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | 无                      | Extractor 的思考预算档位，默认继承主会话。                      |
+| `models.extractor.maxTokens`       | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 `64` 到 `65536` 的安全整数                                                          | 输出 token              | Extractor 单次模型请求的最大输出 token 数。                     |
+| `models.dream.model`               | `string`              | `"inherit"` | `"inherit"`，或以第一个 `/` 分隔 `provider` 与非空 `model-id` 的字符串（`model-id` 可含 `/`）      | 无                      | Dream（定期整理）使用的模型。                                   |
+| `models.dream.thinkingLevel`       | `string`              | `"inherit"` | `"inherit"` \| `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | 无                      | Dream 的思考预算档位，默认继承主会话。                          |
+| `models.dream.maxTokens`           | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 `64` 到 `65536` 的安全整数                                                          | 输出 token              | Dream 单次模型请求的最大输出 token 数。                         |
+| `extraction.enabled`               | `boolean`             | `true`      | `true` 或 `false`                                                                                  | 无                      | 是否开启自动提取（关闭后仍可手动运行 `/memory extract`）。      |
+| `extraction.everyNTurns`           | `number`              | `1`         | `1` 到 `100` 的安全整数                                                                            | 正常结束的对话轮次      | 每累积多少个已结束轮次（settled turns）运行一次自动提取。       |
+| `extraction.idleFlushSeconds`      | `number`              | `120`       | `0` 到 `86400` 的安全整数（`0` 表示禁用空闲提取）                                                  | 秒                      | 轮次未达到 `everyNTurns` 时，空闲多久后自动提取未处理消息。     |
+| `extraction.maxTurns`              | `number`              | `5`         | `1` 到 `8` 的安全整数                                                                              | 子 Agent 工具轮次       | Extractor 单次任务允许的最大模型请求与工具调用循环次数。        |
+| `extraction.recentMessages`        | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 `3` 到 `1000` 的安全整数                                                            | `user`/`assistant` 条数 | 每次提供给 extractor 的最近对话消息上限。                       |
+| `dream.enabled`                    | `boolean`             | `true`      | `true` 或 `false`                                                                                  | 无                      | Dream 总开关（关闭后自动整理与手动 `/memory dream` 均不可用）。 |
+| `dream.minimumHours`               | `number`              | `24`        | `1` 到 `8760` 的安全整数                                                                           | 小时                    | 两次自动整理尝试之间的最短间隔时间。                            |
+| `dream.minimumOtherSessions`       | `number`              | `5`         | `1` 到 `1000` 的安全整数                                                                           | 会话数（不含当前会话）  | 上次整理尝试后，至少需要有多少个其他项目会话更新过才触发整理。  |
+| `dream.scanThrottleSeconds`        | `number`              | `600`       | `0` 到 `86400` 的安全整数（`0` 表示不节流）                                                        | 秒                      | 同一进程内满足 `minimumHours` 后扫描会话目录的最短间隔时间。    |
+| `dream.maxTurns`                   | `number`              | `50`        | `1` 到 `50` 的安全整数                                                                             | 子 Agent 工具轮次       | Dream 单次任务允许的最大模型请求与工具调用循环次数。            |
 
 ## 各字段详细说明与相互关系
 
@@ -106,7 +106,8 @@
   - 设为 `"inherit"` 时，使用当前 Pi 主会话正在使用的模型（`ctx.model`）。若当前主会话没有活动模型，后台任务会报错提示无可用模型。
   - 设为 `"provider/model-id"` 格式字符串时（解析器通过 `indexOf("/")` 检查第一个 `/` 两侧均非空，`model-id` 内部可以继续包含 `/`），扩展会在运行时按第一个 `/` 拆出 `provider` 与 `modelId`，调用 `ctx.modelRegistry.find(provider, modelId)` 并检查 `ctx.modelRegistry.hasConfiguredAuth(model)`。如果字符串不含 `/` 或 `/` 位于首尾，配置解析阶段会回退为 `"inherit"`；如果格式合法但找不到该模型或未配置凭据，运行时会发出 warning 通知并跳过本次任务，**绝不会**回退到 `"inherit"` 或其他模型。
 - **`thinkingLevel`**：
-  - 允许值为 `"off"`、`"minimal"`、`"low"`、`"medium"`、`"high"`、`"xhigh"`、`"max"`。
+  - 允许值为 `"inherit"`、`"off"`、`"minimal"`、`"low"`、`"medium"`、`"high"`、`"xhigh"`、`"max"`。Extractor 和 dream 默认 `"inherit"`，selector 默认 `"off"`。
+  - `"inherit"` 在任务启动时读取主会话当前的 `ctx.thinkingLevel`；若宿主未提供该值则使用 `"off"`。显式档位优先，包括已有配置文件中的值。
   - 运行时会通过 Pi 的 `clampThinkingLevel(model, configured)` 映射到该模型实际支持的最近档位（例如对不支持推理的模型会自动降为 `"off"`）。当最终生效档位为 `"off"` 时，请求不传 `reasoning` 参数。
 - **`maxTokens`**：
   - 允许值为 `"inherit"` 或 `64` 到 `65536` 之间的整数（超出范围如 `32` 或 `100000` 会回退为该角色的默认值：selector 回退为 `512`，extractor 和 dream 回退为 `"inherit"`）。
@@ -133,8 +134,8 @@
 - **`idleFlushSeconds`（`0` 到 `86400`，默认 `120`，单位：秒）**：与 `everyNTurns` 配合使用。当 `everyNTurns > 1` 且当前累积轮次尚未达到阈值，或者上一轮提取因锁占用/后续合并（trailing extraction）需要稍后重试时，如果会话持续空闲达到 `idleFlushSeconds` 秒，扩展会自动触发一次提取。设为 `0` 时关闭空闲计时器触发。
 - **`maxTurns`（`1` 到 `8`，默认 `5`）**：限制 extractor 子 Agent 最多执行多少轮模型调用与工具执行循环。推荐策略是第 1 轮并发读取所有可能更新的记忆文件，第 2 轮并发写入或编辑。如果在最后一轮模型仍返回了工具调用，扩展会执行完该轮工具调用后结束任务，不再发起下一次模型请求。
 - **`recentMessages`（`"inherit"` 或 `3` 到 `1000`，默认 `"inherit"`）**：控制从提取游标（cursor）之后的未处理消息切片中，向后截取多少条 `user` 和 `assistant` 消息发送给 extractor：
-  - 设为 `"inherit"` 时，发送游标之后的全部未处理消息。
-  - 设为整数 `N`（`3` 到 `1000`）时，从切片末尾向前数满 `N` 条 `user` 或 `assistant` 消息，并保留这 `N` 条消息之间的所有 `toolResult` 消息。
+  - 设为 `"inherit"` 时，提取目标为游标之后的全部未处理消息；若有同模型的可复用父请求快照，会同时保留完整父历史作为缓存前缀，任务指令仍只针对近期未处理范围。没有可复用快照时只发送未处理消息。
+  - 设为整数 `N`（`3` 到 `1000`）时，禁用完整父前缀复用，从切片末尾向前数满 `N` 条 `user` 或 `assistant` 消息，并保留这 `N` 条消息之间的所有 `toolResult` 消息。
 
 ### 4. 定期整理配置（`dream`）
 
@@ -161,12 +162,12 @@
     },
     "extractor": {
       "model": "inherit",
-      "thinkingLevel": "low",
+      "thinkingLevel": "inherit",
       "maxTokens": "inherit"
     },
     "dream": {
       "model": "inherit",
-      "thinkingLevel": "medium",
+      "thinkingLevel": "inherit",
       "maxTokens": "inherit"
     }
   },

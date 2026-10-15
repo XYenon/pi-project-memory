@@ -90,6 +90,8 @@ PI_OFFLINE=1 pi --no-extensions --extension ./index.ts --list-models __no_such_m
 - `tests/concurrency.test.ts`：通过多子进程 worker（`lock-worker.ts`、`cas-worker.ts`）验证跨进程锁互斥、死进程锁恢复、dream 时间戳 CAS 与文件并发编辑 CAS。
 - `tests/lifecycle.test.ts`：端到端验证 Pi 钩子生命周期，包括项目信任门控、`enabled: false` 延迟初始化、2 秒预取等待与延迟 `steer` 送达、普通与排队输入的空白门槛、图片归一化去重、完整读取抑制与分支恢复、满 48 小时过期提醒、写后 lint、主 Agent 直接写入去重、三词用户正文门槛、新输入触发 `trailingExtraction`、会话压缩前提取与状态重置、dream 尝试时间保留与异常回滚，以及进程内后台 usage 累计。
 
+缓存回归覆盖索引快照及刷新边界、完整 selector 目录的已读过滤、短期缓存与稳定会话缓存标识、同模型父前缀及 Faux 缓存命中、声明保留但不能执行的父工具、受限写入，以及跨模型、schema 不兼容、整数消息上限和图片阻止时的独立请求回退。Faux 命中只验证请求复用机制，不代表真实 provider 的命中率或账单。
+
 如果修改了 provider 请求参数构造或 Pi SDK 集成接口，除了运行 `pnpm check` 外，还应在配置了真实模型凭据的环境中做端到端手动验证。
 
 ## 长期架构与维护约束
@@ -101,7 +103,7 @@ PI_OFFLINE=1 pi --no-extensions --extension ./index.ts --list-models __no_such_m
 3. **坚持应用层边界与并发正确性，不夸大为操作系统沙箱**：Pi 原生工具的 `cwd` 不是安全边界。后台工具外层必须保留项目信任、批准读取根目录、memory 目录小写 `.md` 写入包含、符号链接拒绝、普通文本读取基线、代次检查、跨进程锁与原子替换。受限 `bash` 必须保留 AST 分类、命令参数白名单、原生执行前的显式路径检查与独立子进程搜索排除规则（严禁通过临时篡改主进程 `process.env` 来限制搜索）。这些机制用于限定后台工具能力与保证并发安全，不得在文档中描述为抵抗同用户恶意进程的完整 OS 级沙箱。
 4. **严格保护静态提示词基线与 `docs/research/` 边界**：
    - `docs/research/` 只记录 Claude Code 2.1.296 二进制的逆向结论、原始提示词、工具定义与证据，必须保留 `Claude Code` 原名与原文，不得混入 Pi 的实现或适配说明。
-   - 运行时四份核心提示词（主记忆、selector、extractor、dream）的静态文本必须与 `tests/fixtures/prompts/*.txt` 保持一致，只允许四类替换（`CLAUDE.md` 改为 `AGENTS.md`、Pi 工具与字段名替换、删除不支持功能的专属段落、`Claude Code` 改为 `the agent`）以及 selector 工具模式末尾的固定 `select_memories` 调用指令。后台工具列表与 codemode 说明通过独立的 `backgroundToolPrompt()` 追加在系统提示词末尾，不得通过篡改 Claude 派生提示词基线来容纳宿主适配。
+   - 运行时四份核心提示词（主记忆、selector、extractor、dream）的静态文本必须与 `tests/fixtures/prompts/*.txt` 保持一致，只允许四类替换（`CLAUDE.md` 改为 `AGENTS.md`、Pi 工具与字段名替换、删除不支持功能的专属段落、`Claude Code` 改为 `the agent`）以及 selector 工具模式末尾的固定 `select_memories` 调用指令。后台工具列表与 codemode 说明通过独立的 `backgroundToolPrompt()` 追加：独立请求放在系统提示词末尾，复用父前缀时放在末尾任务消息中；不得通过篡改 Claude 派生提示词基线来容纳宿主适配。
 5. **保持配置、依赖与测试同步**：
    - `config.example.json` 解析后的配置值必须与 `src/config.ts` 中的 `DEFAULT_CONFIG` 保持一致。
    - `enabled: false` 必须在解析项目路径和创建目录之前生效。

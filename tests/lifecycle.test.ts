@@ -3,9 +3,16 @@ import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test, { type TestContext } from "node:test";
-import type { Context } from "@earendil-works/pi-ai";
+import { type Context, normalizeContext, toToolDeclaration } from "@earendil-works/pi-ai";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { type ExtensionAPI, type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
+import {
+	convertToLlm,
+	createReadTool,
+	createWriteTool,
+	type ExtensionAPI,
+	type ExtensionContext,
+	SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import projectMemoryExtension from "../index.ts";
 import { resolveProjectPaths } from "../src/paths.ts";
 import { mainMemoryPrompt } from "../src/prompts.ts";
@@ -1295,6 +1302,8 @@ test("an external change invalidates full-read recall suppression before selecti
 		harness.context,
 	);
 	await writeFile(topicPath, updated);
+	// This test exercises mtime-based recall invalidation, including on fast filesystems.
+	await utimes(topicPath, new Date(), new Date(Date.now() + 2_000));
 	harness.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("select_memories", { selected_memories: ["external.md"] })),
 	]);
@@ -1496,22 +1505,184 @@ test("external memory edits do not consume pending user prose as direct writes",
 	assert.equal(harness.faux.state.callCount, 1);
 });
 
-test("custom startup events inject memory prompts, index, and pending updates", async (t) => {
-	const harness = await createLifecycleHarness(t, {
-		config: { extraction: { enabled: false }, dream: { enabled: false } },
-	});
-	await harness.extension.emit(
-		"before_agent_start",
-		{ prompt: "", systemPromptOptions: { sections: {} } },
-		harness.context,
-	);
-	await writeFile(join(harness.paths.memoryDir, "MEMORY.md"), "custom startup index\n");
-	const event = { messageType: "custom", systemPromptOptions: { sections: {} as Record<string, string> } };
-	const result = (await harness.extension.emit("before_agent_start", event, harness.context)) as any;
-	assert.equal(event.systemPromptOptions.sections.auto_memory, mainMemoryPrompt(harness.paths.memoryDir));
-	assert.match(event.systemPromptOptions.sections.auto_memory_index!, /custom startup index/);
-	assert.match(result.message.content, /MEMORY\.md/);
-	assert.equal(harness.faux.state.callCount, 0);
+test("memory index stays cached until compaction, navigation, reload, or session start", async (t) => {
+	for (const reset of ["session_compact", "session_tree", "reload-config", "session_start"]) {
+		const harness = await createLifecycleHarness(t, {
+			config: { extraction: { enabled: false }, dream: { enabled: false } },
+		});
+		await writeFile(join(harness.paths.memoryDir, "MEMORY.md"), "initial index\n");
+		const initial = { prompt: "", systemPromptOptions: { sections: {} as Record<string, string> } };
+		await harness.extension.emit("before_agent_start", initial, harness.context);
+		await writeFile(join(harness.paths.memoryDir, "MEMORY.md"), "custom startup index\n");
+		const event = { messageType: "custom", systemPromptOptions: { sections: {} as Record<string, string> } };
+		const result = (await harness.extension.emit("before_agent_start", event, harness.context)) as any;
+		assert.equal(event.systemPromptOptions.sections.auto_memory, mainMemoryPrompt(harness.paths.memoryDir));
+		assert.deepEqual(event.systemPromptOptions.sections, initial.systemPromptOptions.sections);
+		assert.match(event.systemPromptOptions.sections.auto_memory_index!, /initial index/);
+		assert.match(result.message.content, /MEMORY\.md/);
+		assert.match(result.message.content, /loaded copy of MEMORY\.md is now stale/);
+		if (reset === "reload-config") await harness.extension.commands.get("memory")?.handler(reset, harness.context);
+		else await harness.extension.emit(reset, {}, harness.context);
+		const refreshed = { prompt: "", systemPromptOptions: { sections: {} as Record<string, string> } };
+		await harness.extension.emit("before_agent_start", refreshed, harness.context);
+		assert.match(refreshed.systemPromptOptions.sections.auto_memory_index!, /custom startup index/);
+		assert.equal(harness.faux.state.callCount, 0);
+	}
+});
+
+test("maintenance forks preserve the parent prefix and cache while executing only restricted tools", async (t) => {
+	for (const command of ["extract", "dream"]) {
+		const harness = await createLifecycleHarness(t, {
+			config: { extraction: { enabled: false, idleFlushSeconds: 0 }, dream: { enabled: true } },
+		});
+		harness.context.model = { ...harness.context.model!, reasoning: true };
+		harness.context.thinkingLevel = "high";
+		const outside = join(harness.projectRoot, "source.md");
+		const target = join(harness.paths.memoryDir, "saved.md");
+		await writeFile(outside, "project source\n");
+		const messages: any[] = [
+			{
+				role: "system",
+				content: "cached parent prompt",
+				sections: { auto_memory_index: "cached index" },
+				toolsAdded: [
+					toToolDeclaration(createReadTool(harness.projectRoot)),
+					toToolDeclaration(createWriteTool(harness.projectRoot)),
+					{ name: "parent_only", description: "Parent extension tool", parameters: { type: "object", properties: {} } },
+				].map((declaration) => ({
+					...declaration,
+					parameters: JSON.parse(
+						JSON.stringify(declaration.parameters, (_key, value) =>
+							value && typeof value === "object" && !Array.isArray(value)
+								? Object.fromEntries(Object.entries(value).reverse())
+								: value,
+						),
+					),
+				})),
+				timestamp: 1,
+			},
+			{ role: "user", content: "old parent history", timestamp: 2 },
+			{ role: "system", content: "later system patch", timestamp: 3 },
+			{
+				role: "custom",
+				customType: "pi-project-memory-recall",
+				content: "recalled memory",
+				display: false,
+				timestamp: 4,
+			},
+			...harness.projection.messages,
+		];
+		const expected = structuredClone(convertToLlm(messages));
+		await harness.extension.emit("context_with_system", { messages }, harness.context);
+		messages[0].sections.auto_memory_index = "mutated after capture";
+		harness.faux.setResponses([fauxAssistantMessage("parent final answer")]);
+		const parentAnswer = await harness.faux
+			.streamSimple(harness.faux.getModel(), { messages: expected } as any, {
+				cacheRetention: "short",
+				sessionId: harness.context.sessionManager.getSessionId(),
+			})
+			.result();
+		await harness.extension.emit("message_end", { message: parentAnswer }, harness.context);
+		expected.push(parentAnswer);
+		const usages: number[] = [];
+		const reasoningLevels: unknown[] = [];
+		(harness.context.modelRegistry as any).streamSimple = (model: any, context: Context, options: any) => {
+			reasoningLevels.push(options.reasoning);
+			const stream = harness.faux.streamSimple(model, normalizeContext(context), options);
+			return {
+				result: async () => {
+					const result = await stream.result();
+					usages.push(result.usage.cacheRead);
+					return result;
+				},
+			};
+		};
+		harness.faux.setResponses([
+			(context, options) => {
+				assert.deepEqual(context.messages.slice(0, expected.length), expected);
+				assert.equal(options?.sessionId, harness.context.sessionManager.getSessionId());
+				assert.equal(options?.cacheRetention, "short");
+				return fauxAssistantMessage([
+					fauxToolCall("parent_only", {}),
+					fauxToolCall("write", { path: outside, content: "must be denied" }),
+				]);
+			},
+			(context) => {
+				const denied = context.messages.slice(-2);
+				assert.ok(denied.every((message) => message.role === "toolResult" && message.isError));
+				return fauxAssistantMessage(fauxToolCall("write", { path: target, content: "saved memory\n" }));
+			},
+			fauxAssistantMessage("done"),
+		]);
+		await harness.extension.commands.get("memory")?.handler(command, harness.context);
+		assert.equal(usages.length, 3);
+		assert.deepEqual(reasoningLevels, ["high", "high", "high"]);
+		assert.ok(usages[0]! > 0, "Fork failed to reuse the Faux provider's parent cache");
+		assert.equal(await readFile(outside, "utf8"), "project source\n");
+		assert.equal(await readFile(target, "utf8"), "saved memory\n");
+	}
+});
+
+test("maintenance uses an independent prefix when the model, schema, or context policy differs", async (t) => {
+	for (const reason of [
+		"model",
+		"schema",
+		"schema-type",
+		"schema-required",
+		"schema-constraint",
+		"schema-array-order",
+		"recentMessages",
+		"blockImages",
+		"compaction",
+	]) {
+		const harness = await createLifecycleHarness(t, {
+			config: {
+				extraction: {
+					enabled: false,
+					idleFlushSeconds: 0,
+					recentMessages: reason === "recentMessages" ? 3 : "inherit",
+				},
+				dream: { enabled: false },
+			},
+		});
+		if (reason === "blockImages") harness.extension.api.getSettings = () => ({ images: { blockImages: true } });
+		const declaration = structuredClone(toToolDeclaration(createWriteTool(harness.projectRoot)));
+		const parameters = declaration.parameters as any;
+		if (reason === "schema-type") parameters.properties.path.type = "number";
+		if (reason === "schema-required") parameters.required = ["path"];
+		if (reason === "schema-constraint") parameters.properties.path.minLength = 2;
+		if (reason === "schema-array-order") parameters.required.reverse();
+		const messages = [
+			{
+				role: "system",
+				content: "parent prefix",
+				timestamp: 1,
+				toolsAdded:
+					reason === "schema"
+						? [{ name: "read", description: "custom", parameters: { type: "object", properties: {} } }]
+						: [declaration],
+			},
+			{ role: "user", content: "old parent-only history", timestamp: 2 },
+		];
+		await harness.extension.emit("context_with_system", { messages }, harness.context);
+		if (reason === "model") harness.context.model = { ...harness.context.model!, id: "different-model" };
+		if (reason === "compaction") await harness.extension.emit("session_compact", {}, harness.context);
+		let request: { context: Context; options: any } | undefined;
+		harness.faux.setResponses([
+			(context, options) => {
+				request = { context: context as unknown as Context, options };
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await harness.extension.commands.get("memory")?.handler("extract", harness.context);
+		assert.equal(harness.faux.state.callCount, 1);
+		assert.ok(request, reason);
+		assert.equal(request.context.tools?.length, 6, reason);
+		assert.match(request.context.systemPrompt ?? "", /Background memory task tools/, reason);
+		assert.doesNotMatch(JSON.stringify(request.context.messages), /old parent-only history/, reason);
+		assert.notEqual(request.options?.sessionId, harness.context.sessionManager.getSessionId(), reason);
+		assert.equal(request.options?.cacheRetention, "short", reason);
+	}
 });
 
 test("restored writes deduplicate only matching successful memory results after the cursor", async (t) => {
