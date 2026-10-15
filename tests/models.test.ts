@@ -42,6 +42,7 @@ function selectorContext(
 		ui: { notify: (message: string, level: string) => notices.push({ message, level }) },
 		model,
 		signal: undefined,
+		sessionManager: { getSessionId: () => "selector-session" },
 		scopedModels: [],
 		modelRegistry: {
 			getAvailable: () => availableModels,
@@ -447,7 +448,7 @@ test("selector keeps the schema-tool path when native structured output is disab
 		provider: "test",
 		id: "sonnet",
 		name: "Sonnet",
-		api: "custom-api",
+		api: "anthropic-messages",
 		reasoning: false,
 		cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
 	} as Model<any>;
@@ -455,7 +456,7 @@ test("selector keeps the schema-tool path when native structured output is disab
 	const response = {
 		role: "assistant",
 		content: [{ type: "toolCall", id: "1", name: "select_memories", arguments: { selected_memories: ["topic-0.md"] } }],
-		api: "custom-api",
+		api: primary.api,
 		provider: "test",
 		model: "sonnet",
 		usage: {},
@@ -517,7 +518,7 @@ test("pi-messages and unknown APIs go directly to the same-model schema tool", a
 	}
 });
 
-test("selector keeps prior query and answer history across turns", async () => {
+test("selector keeps its catalog and cached query history while filtering recalled files after selection", async () => {
 	const primary = {
 		provider: "test",
 		id: "claude-sonnet-primary",
@@ -527,13 +528,15 @@ test("selector keeps prior query and answer history across turns", async () => {
 		cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
 	} as Model<any>;
 	const contexts: any[] = [];
+	const requests: any[] = [];
 	let timestamp = 1;
-	const ctx = selectorContext(primary, (_model, context) => {
+	const ctx = selectorContext(primary, (_model, context, options) => {
 		contexts.push(context);
+		requests.push(options);
 		return {
 			result: async () => ({
 				role: "assistant",
-				content: [{ type: "text", text: '{"selected_memories":[]}' }],
+				content: [{ type: "text", text: '{"selected_memories":["topic-0.md","topic-1.md"]}' }],
 				api: "custom-api",
 				provider: "test",
 				model: primary.id,
@@ -545,7 +548,13 @@ test("selector keeps prior query and answer history across turns", async () => {
 	});
 	const history: any[] = [];
 	await selectRelevantMemories("first query", topics, new Map(), DEFAULT_CONFIG, ctx, history);
-	await selectRelevantMemories("second query", topics, new Map(), DEFAULT_CONFIG, ctx, history);
+	assert.deepEqual(
+		await selectRelevantMemories("second query", topics, new Map([["topic-0.md", 0]]), DEFAULT_CONFIG, ctx, history),
+		["topic-1.md"],
+	);
+	assert.deepEqual(contexts[1].messages[0].content, contexts[0].messages[0].content);
+	assert.equal(requests[0].cacheRetention, "short");
+	assert.equal(requests[1].sessionId, requests[0].sessionId);
 	assert.equal(history.length, 2);
 	assert.deepEqual(
 		contexts[1].messages.map((message: any) => message.role),
@@ -870,10 +879,17 @@ test("child API failures remain explicit for cursor-owning callers", async () =>
 test("configured thinking level clamps to the closest level supported by the selected model", () => {
 	const noReasoning = { reasoning: false } as Model<any>;
 	assert.equal(effectiveThinkingLevel(noReasoning, "high"), "off");
+	assert.equal(effectiveThinkingLevel(noReasoning, "inherit", "high"), "off");
+	const reasoning = { reasoning: true } as Model<any>;
+	assert.equal(effectiveThinkingLevel(reasoning, "inherit", "high"), "high");
+	assert.equal(effectiveThinkingLevel(reasoning, "inherit", "off"), "off");
+	assert.equal(effectiveThinkingLevel(reasoning, "inherit"), "off");
+	assert.equal(effectiveThinkingLevel(reasoning, "low", "high"), "low");
 
 	const sparse = {
 		reasoning: true,
 		thinkingLevelMap: { medium: null, high: null, xhigh: "xhigh", max: null },
 	} as Model<any>;
 	assert.equal(effectiveThinkingLevel(sparse, "medium"), "xhigh");
+	assert.equal(effectiveThinkingLevel(sparse, "inherit", "medium"), "xhigh");
 });

@@ -2,13 +2,14 @@ import { lstat, realpath } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ChildCodemodeOptions } from "./src/child-codemode.ts";
 import { configPath, loadConfig } from "./src/config.ts";
 import {
 	addUsage,
 	effectiveThinkingLevel,
 	emptyUsage,
+	type ParentMemoryContext,
 	resolveRoleModel,
 	runChildAgent,
 	type SelectorHistoryEntry,
@@ -106,6 +107,8 @@ interface RuntimeState {
 	staleLoadedMemoryPaths: Set<string>;
 	selectorHistory: SelectorHistoryEntry[];
 	turnSnapshot: Map<string, MarkdownSnapshotEntry>;
+	memoryIndexPrompt?: string;
+	parentContext?: ParentMemoryContext;
 	idleTimer?: NodeJS.Timeout;
 	activeExtraction?: Promise<ChildRunResult | null>;
 	extractionAbortController?: AbortController;
@@ -337,6 +340,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 	pi.on("message_end", (event, ctx) => {
 		const state = runtime;
 		if (!state?.config.enabled || !state.paths || !ctx.isProjectTrusted() || state.shuttingDown) return;
+		state.parentContext?.messages.push(...structuredClone(convertToLlm([event.message])));
 		if (event.message.role !== "user") return;
 		const prepared = state.awaitingPreparedUserMessage;
 		state.awaitingPreparedUserMessage = false;
@@ -368,14 +372,20 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 			state.awaitingPreparedUserMessage = true;
 		}
 		if (!prefetch) await captureExternalMemoryChanges(state);
-		const index = await readIndex(paths.memoryDir);
-		const indexSnapshot = await snapshotMarkdownFile(paths.memoryDir, "MEMORY.md", state.turnSnapshot.get("MEMORY.md"));
-		if (indexSnapshot) state.turnSnapshot.set("MEMORY.md", indexSnapshot);
-		else state.turnSnapshot.delete("MEMORY.md");
+		if (state.memoryIndexPrompt === undefined) {
+			state.memoryIndexPrompt = indexPrompt(await readIndex(paths.memoryDir), paths.memoryDir);
+			const indexSnapshot = await snapshotMarkdownFile(
+				paths.memoryDir,
+				"MEMORY.md",
+				state.turnSnapshot.get("MEMORY.md"),
+			);
+			if (indexSnapshot) state.turnSnapshot.set("MEMORY.md", indexSnapshot);
+			else state.turnSnapshot.delete("MEMORY.md");
+			state.loadedMemoryPaths.add("MEMORY.md");
+			state.staleLoadedMemoryPaths.delete("MEMORY.md");
+		}
 		event.systemPromptOptions.sections.auto_memory = mainMemoryPrompt(paths.memoryDir);
-		event.systemPromptOptions.sections.auto_memory_index = indexPrompt(index, paths.memoryDir);
-		state.loadedMemoryPaths.add("MEMORY.md");
-		state.staleLoadedMemoryPaths.delete("MEMORY.md");
+		event.systemPromptOptions.sections.auto_memory_index = state.memoryIndexPrompt;
 
 		if (!prefetch) return updateMessage(drainMemoryUpdates(state));
 		if (!prefetch.result) {
@@ -403,6 +413,20 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 		return {
 			messages: [...event.messages, { role: "custom" as const, ...update.message, timestamp: Date.now() }],
 		};
+	});
+
+	pi.on("context_with_system", (event, ctx) => {
+		const state = runtime;
+		if (!state?.config.enabled || !state.paths || !ctx.isProjectTrusted() || !ctx.model) return;
+		// Image blocking runs after this hook. In that mode, use the independent
+		// request path rather than claiming this is the provider's exact prefix.
+		state.parentContext = pi.getSettings().images?.blockImages
+			? undefined
+			: {
+					model: ctx.model,
+					messages: structuredClone(convertToLlm(event.messages)),
+					sessionId: ctx.sessionManager.getSessionId(),
+				};
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
@@ -558,6 +582,8 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 		// A successful compaction removes earlier recall messages from the model
 		// context even when pre-compaction extraction was disabled or failed.
 		cancelRecallPrefetch(state);
+		state.memoryIndexPrompt = undefined;
+		state.parentContext = undefined;
 		state.selectorHistory.length = 0;
 		state.recalled.clear();
 		state.recallBytes = 0;
@@ -583,6 +609,8 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 		state.recallBytes = restoreRecallBytes(ctx);
 		state.loadedMemoryPaths = new Set(state.recalled.keys());
 		state.staleLoadedMemoryPaths.clear();
+		state.memoryIndexPrompt = undefined;
+		state.parentContext = undefined;
 		state.selectorHistory.length = 0;
 	});
 
@@ -647,6 +675,9 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 				cancelIdleTimer(state);
 				if (previous.enabled && next.enabled) invalidatePasses(state);
 				state.config = next;
+				state.memoryIndexPrompt = undefined;
+				state.parentContext = undefined;
+				state.selectorHistory.length = 0;
 				state.lastDreamScanAt = 0;
 				if (previous.enabled && !next.enabled) {
 					invalidatePasses(state);
@@ -713,7 +744,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 				const configured = state.config.models[role];
 				try {
 					const model = resolveRoleModel(role, configured, ctx);
-					const thinking = effectiveThinkingLevel(model, configured.thinkingLevel);
+					const thinking = effectiveThinkingLevel(model, configured.thinkingLevel, ctx.thinkingLevel);
 					return `${formatModel(configured.model, ctx)} [available: ${model.provider}/${model.id}; thinking ${configured.thinkingLevel} → ${thinking}; maxTokens ${configured.maxTokens}]`;
 				} catch (error) {
 					return `${formatModel(configured.model, ctx)} [unavailable: ${errorMessage(error)}]`;
@@ -1001,6 +1032,7 @@ async function scheduleExtraction(
 
 	const projection = ctx.sessionManager.buildSessionProjection();
 	const sinceCursor = [...cursorSlice(ctx, state.cursorEntryId, projection)];
+	const parentContext = state.parentContext && { ...state.parentContext, messages: [...state.parentContext.messages] };
 	const leafId = projection.entries.at(-1)?.sourceEntry.id;
 	const directWriteEpoch = state.directWriteEpoch;
 	if (
@@ -1074,6 +1106,7 @@ async function scheduleExtraction(
 			prompt: extractionPrompt(sourceMessageCount, topics, paths.memoryDir),
 			sourceMessages: source,
 			systemPrompt: childSystemPrompt(ctx, paths.memoryDir),
+			parentContext: identity.config.extraction.recentMessages === "inherit" ? parentContext : undefined,
 			codemode: state.getCodemode(),
 			config: identity.config,
 			paths,
@@ -1139,6 +1172,7 @@ async function maybeDream(ctx: ExtensionContext, state: RuntimeState, manual: bo
 	if (!paths || !state.config.enabled || !state.config.dream.enabled || state.shuttingDown || !ctx.isProjectTrusted())
 		return;
 	const identity: OperationIdentity = { generation: state.generation, paths, config: state.config };
+	const parentContext = state.parentContext && { ...state.parentContext, messages: [...state.parentContext.messages] };
 	if (state.activeDream) {
 		if (manual) ctx.ui.notify("Memory dream is already running", "warning");
 		return;
@@ -1200,6 +1234,7 @@ async function maybeDream(ctx: ExtensionContext, state: RuntimeState, manual: bo
 			prompt: dreamPrompt(paths, sessionDir, sessionIds),
 			sourceMessages: dreamSource,
 			systemPrompt: childSystemPrompt(ctx, paths.memoryDir),
+			parentContext,
 			codemode: state.getCodemode(),
 			config: identity.config,
 			paths,
@@ -1303,6 +1338,7 @@ async function trackPass<T>(passes: Set<Promise<unknown>>, current: Promise<T>):
 
 function invalidatePasses(state: RuntimeState): void {
 	state.generation++;
+	state.parentContext = undefined;
 	state.extractionAbortController?.abort();
 	state.dreamAbortController?.abort();
 	state.trailingExtraction = false;

@@ -20,6 +20,8 @@ test("parseConfig uses Claude-compatible selector defaults and inherited mainten
 	const config = parseConfig({});
 	assert.equal(config.models.selector.maxTokens, 512);
 	assert.equal(config.models.selector.structuredOutput, true);
+	assert.equal(config.models.extractor.thinkingLevel, "inherit");
+	assert.equal(config.models.dream.thinkingLevel, "inherit");
 	assert.equal(config.models.extractor.maxTokens, "inherit");
 	assert.equal(config.models.dream.maxTokens, "inherit");
 	assert.equal(config.extraction.recentMessages, "inherit");
@@ -36,6 +38,11 @@ test("parseConfig uses Claude-compatible selector defaults and inherited mainten
 		false,
 	);
 	assert.equal(parseConfig({ extraction: { recentMessages: 20 } }).extraction.recentMessages, 20);
+	assert.equal(
+		parseConfig({ models: { selector: { thinkingLevel: "inherit" } } }).models.selector.thinkingLevel,
+		"inherit",
+	);
+	assert.equal(parseConfig({ models: { dream: { thinkingLevel: "high" } } }).models.dream.thinkingLevel, "high");
 });
 
 test("config.example.json stays identical to DEFAULT_CONFIG", async () => {

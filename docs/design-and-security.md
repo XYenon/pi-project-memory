@@ -17,7 +17,8 @@ The extension does **not** try to defend against local malicious processes runni
 
 - **Capture of user text**: The selector handles only the user text that the main session actually submits to the model. For a normal interactive request, the `before_agent_start` hook starts prefetching with the final prompt. For a queued or streamed follow-up message, prefetching starts when the message actually enters the session (`message_end`). The raw `input` event does not start a model request. This avoids extra calls on text that other extensions may intercept or rewrite first.
 - **Whitespace threshold**: After `trim()`, the user input must contain a whitespace character inside it (matching `/\s/`). The selector runs only when the cumulative recall count of the current branch has not reached the 61,440 limit.
-- **Injection and waiting**: Before each normal request starts, the extension injects the trimmed `MEMORY.md` into the system prompt (in the `auto_memory` and `auto_memory_index` sections). It waits up to 2 seconds for any selector prefetch that is still running. If the prefetch finishes within 2 seconds, the recalled topic content goes directly into this request. If it takes longer than 2 seconds, the result is sent as a Pi `steer` message in the next model call once it is ready.
+- **Injection and waiting**: The first request loads and caches the trimmed `MEMORY.md`. Later requests reuse the same system prompt snapshot (`auto_memory` and `auto_memory_index`). Index changes append a staleness notice; compaction, branch navigation, configuration reload, and session start clear the snapshot. Normal requests wait up to 2 seconds for selector prefetch: results that arrive in time are injected directly, and later results use Pi's `steer` delivery.
+- **Selector caching**: The catalog contains all topics from the current scan. Read suppression filters returned filenames after selection; only actual catalog changes alter the prefix. Query/answer history and a stable session cache ID support subsequent requests. Requests use Pi's `cacheRetention: "short"`; cache markers are managed by Pi's API adapters.
 
 ### 2. During a turn: main agent tool interception and enhancement
 
@@ -81,12 +82,20 @@ At the scan and recall boundaries, the extension skips a topic file when opening
 
 ## Background tools and execution environment
 
-Background sub-agents (extractor and dream) declare only the following six tools, which are wrapped from Pi native factories:
+Background sub-agents (extractor and dream) execute only the following six tools, which are wrapped from Pi native factories:
 
 - `read`: Reuses Pi's native `createReadTool`. It allows reading UTF-8 text files and common image formats inside approved roots. It explicitly rejects `.pdf` files, `.ipynb` files, binary files that contain NUL bytes, and files that are not UTF-8 encoded.
 - `find` and `grep`: Run in a separate subprocess, `native-search-worker.mjs`, and reuse Pi's native `createFindTool` and `createGrepTool`. The subprocess resolves `fd` and `rg` through the host's `PATH` and clears `RIPGREP_CONFIG_PATH`. It forces `--no-config` and `--no-follow` on `grep`, which prevents following symbolic links. It places the directory exclusion rules last among the options, before the `--` separator on the command line. This ensures that a positive glob passed by the model cannot bypass the exclusion rules. Each `grep` call has a 20-second timeout.
 - `write` and `edit`: Reuse Pi's native parameter schema, text replacement (`edits[]`), and unified diff generation. The low-level file write, however, is replaced with the extension's own safe publishing pipeline. That pipeline includes path validation, content cleanup, the plain-text read baseline check, cross-process file locks, compare-and-swap, atomic rename, and the post-write lint hint.
 - `bash`: Reuses the process management and output truncation logic of Pi's native `createBashTool`. The default timeout is 120 seconds, and the maximum is 600 seconds. Full output logs that do not fit the inline window are moved to a temporary directory for the task and deleted automatically when the task ends. Before execution, each command must pass the restricted `bash` check described below.
+
+### Parent request prefix and execution permissions
+
+The public `context_with_system` hook captures the parent's system messages, tool declarations, and projected messages. `message_end` adds messages completed afterward. Each task freezes this snapshot at its start. With the same provider, API, and model ID, and compatible schemas for tools with matching names, the background request preserves the parent prefix and appends tool restrictions and task instructions in a user message. Parent extension and MCP declarations do not connect to executors: calls to them return errors. File tools with matching names still run through the restricted implementations.
+
+Schema compatibility compares the JSON representation of the complete `parameters` recursively, ignoring object key order at every depth. Values and array order must still match. This comparison does not rewrite the parent declarations sent in the request.
+
+Across models, without a captured request, with Pi image blocking enabled, or with incompatible tool schemas, the task uses an independent system prompt and restricted tool declarations. An integer extractor `recentMessages` also selects this path to respect the message limit. Both paths use `cacheRetention: "short"`; forks use the parent session ID, and independent tasks each keep their own stable ID. Full parent history can increase input costs on a cache miss. The provider determines actual cache behavior. Other extensions that rewrite a request after the capture hook, later host projections, and provider parameter differences can also affect hits.
 
 ### Background Codemode adaptation
 

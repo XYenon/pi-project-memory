@@ -5,7 +5,7 @@ export type MemoryRole = "selector" | "extractor" | "dream";
 
 export interface RoleModelConfig {
 	model: "inherit" | `${string}/${string}`;
-	thinkingLevel: ThinkingLevel;
+	thinkingLevel: ThinkingLevel | "inherit";
 	maxTokens: "inherit" | number;
 }
 

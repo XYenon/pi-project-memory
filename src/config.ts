@@ -8,8 +8,8 @@ export const DEFAULT_CONFIG: ProjectMemoryConfig = {
 	autoMemoryDirectory: null,
 	models: {
 		selector: { model: "inherit", thinkingLevel: "off", maxTokens: 512, structuredOutput: true },
-		extractor: { model: "inherit", thinkingLevel: "low", maxTokens: "inherit" },
-		dream: { model: "inherit", thinkingLevel: "medium", maxTokens: "inherit" },
+		extractor: { model: "inherit", thinkingLevel: "inherit", maxTokens: "inherit" },
+		dream: { model: "inherit", thinkingLevel: "inherit", maxTokens: "inherit" },
 	},
 	extraction: {
 		enabled: true,
@@ -31,7 +31,7 @@ export function configPath(): string {
 	return join(getAgentDir(), "project-memory", "config.json");
 }
 
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const THINKING_LEVELS = new Set(["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 function record(value: unknown): Record<string, unknown> | undefined {
 	return value !== null && typeof value === "object" && !Array.isArray(value)
