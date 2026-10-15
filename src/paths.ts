@@ -13,7 +13,7 @@ const execFileAsync = promisify(execFile);
 export const VCS_METADATA_DIRECTORIES = [".git", ".hg", ".svn", ".bzr", ".jj", ".sl"] as const;
 const VCS_METADATA_SET = new Set<string>(VCS_METADATA_DIRECTORIES);
 
-/** Match Pi native tool path normalization on the supported macOS/Linux platforms. */
+/** Match Pi native tool path normalization on the supported Unix platforms. */
 export function resolveToolPath(cwd: string, input: string): string {
 	let path = input.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
 	if (path === "~") path = homedir();

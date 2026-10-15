@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, link, mkdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -137,7 +137,7 @@ test("topic scans and backfill retain newest topics under a low file-descriptor 
 		await utimes(path, modified, modified);
 	}
 	const { stdout } = await promisify(execFile)(
-		"/bin/bash",
+		"bash",
 		[
 			"-c",
 			'ulimit -n 128\nexec "$@"',
@@ -298,11 +298,39 @@ test("atomic replacement of a hard-linked entry leaves the other name unchanged"
 	assert.equal(info.mode & 0o777, 0o600);
 	assert.equal(await readFile(filePath, "utf8"), "durable\n");
 	const alias = join(root, "alias.md");
-	await link(filePath, alias);
+	try {
+		await link(filePath, alias);
+	} catch (error) {
+		if (process.platform === "android" && ["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? ""))
+			return t.skip("Android policy prohibits hard links");
+		throw error;
+	}
 	const expected = await baseline(filePath);
 	await atomicWriteIfBaseline(filePath, expected, () => "updated\n");
 	assert.equal(await readFile(filePath, "utf8"), "updated\n");
 	assert.equal(await readFile(alias, "utf8"), "durable\n");
+});
+
+test("new memory files publish exclusively with private permissions and no staging files", async (t) => {
+	const root = await createTempDirectory(t, "pi-memory-exclusive-create-");
+	const filePath = join(root, "fact.md");
+	const results = await Promise.allSettled([
+		atomicWriteIfBaseline(filePath, null, () => "first\n"),
+		atomicWriteIfBaseline(filePath, null, () => "second\n"),
+	]);
+	assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+	assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+	const content = await readFile(filePath, "utf8");
+	assert.ok(content === "first\n" || content === "second\n");
+	assert.equal((await stat(filePath)).mode & 0o777, 0o600);
+	assert.deepEqual(await readdir(root), ["fact.md"]);
+	await assert.rejects(
+		atomicWriteIfBaseline(filePath, null, () => "overwrite\n"),
+		/modified since it was read/,
+	);
+	assert.equal(await readFile(filePath, "utf8"), content);
+	await atomicWriteIfBaseline(filePath, await baseline(filePath), () => "updated\n");
+	assert.equal(await readFile(filePath, "utf8"), "updated\n");
 });
 
 test("atomicWriteIfBaseline rejects a changed file instead of losing the update", async (t) => {

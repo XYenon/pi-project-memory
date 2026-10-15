@@ -23,6 +23,7 @@ export async function runNativeSearch(
 				env: {
 					PATH: process.env.PATH ?? "/usr/bin:/bin",
 					HOME: directory,
+					TMPDIR: directory,
 					PI_CODING_AGENT_DIR: directory,
 					PI_OFFLINE: "1",
 					RIPGREP_CONFIG_PATH: "",

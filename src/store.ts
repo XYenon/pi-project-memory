@@ -1,6 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, type Dirent, type Stats } from "node:fs";
-import { access, link, lstat, mkdir, open, readdir, realpath, rename, rm, stat, utimes } from "node:fs/promises";
+import {
+	access,
+	copyFile,
+	link,
+	lstat,
+	mkdir,
+	open,
+	readdir,
+	realpath,
+	rename,
+	rm,
+	stat,
+	utimes,
+} from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import fg from "fast-glob";
@@ -438,7 +451,10 @@ async function publishFile(
 		await beforeRename?.();
 		if (exclusiveCreate) {
 			try {
-				await link(temporary, filePath);
+				// Android SELinux can prohibit hard links even in Termux's private storage.
+				// Exclusive copying still refuses existing targets, but is not atomic for readers.
+				if (process.platform === "android") await copyFile(temporary, filePath, constants.COPYFILE_EXCL);
+				else await link(temporary, filePath);
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code === "EEXIST")
 					throw new Error(`File was created while the update was staged: ${filePath}. Read it before editing.`);

@@ -19,7 +19,7 @@ For the underlying hook mechanism, the security protocol, and a detailed compari
 
 ### 1. Requirements and installation
 
-This extension supports macOS and Linux. Your system needs `bash`, `git`, `rg` (ripgrep), and `fd` installed.
+This extension supports macOS, Linux, and Android through Termux. Your system needs `bash`, `git`, `rg` (ripgrep), and `fd` installed.
 
 The recommended way to install is from npm:
 
@@ -48,6 +48,17 @@ To extract information from the current conversation into memory right away, run
 ```bash
 pi install npm:pi-project-memory
 ```
+
+### Install on Termux
+
+Install the runtime tools and the compiler toolchain needed for the native `tree-sitter` dependencies, then install the extension in Pi:
+
+```bash
+pkg install nodejs-lts bash git ripgrep fd python make clang
+pi install npm:pi-project-memory
+```
+
+If compilation reports `Undefined variable android_ndk_path`, set `export GYP_DEFINES="android_ndk_path=''"` and retry the installation.
 
 ### Install from GitHub
 

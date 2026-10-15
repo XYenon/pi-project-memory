@@ -19,7 +19,7 @@ Pi Project Memory 是 Pi 的项目自动记忆扩展。它把每个项目的长�
 
 ### 1. 环境要求与安装
 
-本扩展支持 macOS 和 Linux，运行环境需要安装 `bash`、`git`、`rg`（ripgrep）和 `fd`。
+本扩展支持 macOS、Linux 和 Android 上的 Termux，运行环境需要安装 `bash`、`git`、`rg`（ripgrep）和 `fd`。
 
 推荐从 npm 安装：
 
@@ -48,6 +48,17 @@ pi install npm:pi-project-memory
 ```bash
 pi install npm:pi-project-memory
 ```
+
+### 在 Termux 中安装
+
+先安装运行工具及编译原生 `tree-sitter` 依赖所需的工具链，再通过 Pi 安装扩展：
+
+```bash
+pkg install nodejs-lts bash git ripgrep fd python make clang
+pi install npm:pi-project-memory
+```
+
+如果编译时提示 `Undefined variable android_ndk_path`，请先执行 `export GYP_DEFINES="android_ndk_path=''"`，再重新安装。
 
 ### 从 GitHub 安装
 

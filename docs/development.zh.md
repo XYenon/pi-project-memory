@@ -13,6 +13,14 @@ pnpm install
 
 系统环境需要安装 `bash`、`git`、`rg`（ripgrep）和 `fd`。项目将 `@earendil-works/pi-agent-core`、`@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent` 和 `typebox` 声明在 `peerDependencies`（版本范围保持 `*`），并在 `devDependencies` 中安装用于本地开发与测试的具体版本。请勿将 Pi 宿主核心包放入运行时 `dependencies`。
 
+## 在 Termux 中开发
+
+先按 [Termux 安装说明](../README.zh.md#在-termux-中安装)安装运行工具与原生编译依赖，再在 Termux 私有存储中的源码目录执行 `pnpm install` 和 `pnpm test`。测试脚本使用 Android 的 `/system/bin/sh`，并通过 `PATH` 查找 Bash。硬链接替换测试仅在 Android 策略拒绝硬链接操作时跳过；独占新建、更新和并发检查仍会执行。
+
+搜索子进程在 Android 上使用 `/system/bin/sh`，在 macOS/Linux 上使用 `/bin/sh`，并将 `TMPDIR` 指向自身的私有临时目录，避免依赖 Android 的默认临时路径。
+
+当前锁定的 Biome 和 TypeScript 7 包尚未提供 Android 可执行程序，因此其 npm 启动脚本无法在 Termux 中自动选择程序。在已测试的 ARM64 设备上，Biome 的 Linux ARM64 musl 静态程序可以直接运行，将 `BIOME_BINARY` 设为其绝对路径即可通过 npm 启动脚本调用。TypeScript 7 的 Linux ARM64 程序直接运行时会被 Android 系统调用策略拦截，但可在 PRoot Linux 环境中运行。也可以直接执行 `pnpm --package=typescript@6.0.3 dlx tsc --noEmit` 做额外的兼容性检查，项目锁定的类型检查器仍为 TypeScript 7。这些开发工具限制不影响 Pi 直接加载扩展的 TypeScript 源码，也不影响在 Termux 中运行 `pnpm test`。
+
 ## 常用校验与测试命令
 
 ```bash
@@ -79,11 +87,11 @@ PI_OFFLINE=1 pi --no-extensions --extension ./index.ts --list-models __no_such_m
 
 `tests/` 目录按模块划分单元测试与集成测试，全程使用本地临时目录与 Faux provider，不发送外部付费网络请求：
 
-- `tests/config.test.ts`：测试独立角色模型配置、默认值、非法数值回退、`config.example.json` 与 `DEFAULT_CONFIG` 的一致性，以及 `package.json` 的平台声明（`darwin`、`linux`）。
+- `tests/config.test.ts`：测试独立角色模型配置、默认值、非法数值回退、`config.example.json` 与 `DEFAULT_CONFIG` 的一致性，以及 `package.json` 的平台声明（`darwin`、`linux`、`android`）。
 - `tests/prompts.test.ts`：逐字比对 `mainMemoryPrompt`、`SELECTOR_SYSTEM_PROMPT`、`extractionPrompt`、`dreamPrompt` 与 `tests/fixtures/prompts/*.txt` 基线文件；验证取回消息头、过期提醒、预算计费内容以及 Unicode / 混淆标签净化。
 - `tests/models.test.ts`：测试 selector 输出解析、各 API 协议的原生 JSON Schema payload 转换、客户端格式错误的同模型 `select_memories` 工具降级、认证/限流/5xx/长度截断等不可重试错误的拦截、查询历史保持、同模型 `thinking` 保留与跨模型签名剥离、后台子 Agent 的 `ctx.cwd` 传递与 `maxTurns` 边界。
 - `tests/paths.test.ts`：测试 VCS 目录段识别、`autoMemoryDirectory` 合法性与回退、共享 `memory-roots` 锁与整理状态、命名空间符号链接拒绝、并发 `.project-root` 预留、项目 Key 冲突消歧以及 Git worktree 共用主检出身份。
-- `tests/store.test.ts`：测试路径简写归一化、`MEMORY.md` 200 行 / 25,000 UTF-16 代码单元裁剪与 80% 自动补建、低文件描述符限制下的 16 并发扫描、4,096 字节完整 UTF-8 行取回、兼容旧版扁平 frontmatter、硬链接安全的原子替换、读取基线 CAS 冲突检测、共享整理状态迁移与跨进程锁租约。
+- `tests/store.test.ts`：测试路径简写归一化、`MEMORY.md` 200 行 / 25,000 UTF-16 代码单元裁剪与 80% 自动补建、低文件描述符限制下的 16 并发扫描、4,096 字节完整 UTF-8 行取回、兼容旧版扁平 frontmatter、硬链接安全的原子替换、保留私有权限的独占新建、读取基线 CAS 冲突检测、共享整理状态迁移与跨进程锁租约。
 - `tests/child-tools.test.ts`：验证后台六工具的 Pi 原生名称与 schema、继承父会话 `ctx.cwd`、显式分页读取建立基线而自动截断或图片读取撤销基线、拒绝 `.pdf` 与 `.ipynb`、`edit` 的多处修改与 `staleRecovered` 恢复、批准读取根与 session 目录排除，以及 `bash rm` 的基线与受保护子目录限制。
 - `tests/child-codemode.test.ts`：验证后台任务在 `on` 与 `only` 模式下封装 Pi 原生 `codemode`、仅暴露六个受限工具、隔离任务内 `store()` / `load()`、溢出输出文件重定位与清理，以及脚本执行中途代次失效或中止时的即时拦截。
 - `tests/bash-readonly.test.ts` 与 `tests/search-boundaries.test.ts`：验证 `tree-sitter-bash` 只读命令与参数分类、危险 Git 配置拦截、静态校验后的原生 `xargs` 执行、忽略宿主 `RIPGREP_CONFIG_PATH` 的 `--follow` 设置，以及 dream 对原始 session 目录的只读访问。

@@ -52,7 +52,7 @@ test("config.example.json stays identical to DEFAULT_CONFIG", async () => {
 
 test("package metadata declares the supported Unix platforms", async () => {
 	const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-	assert.deepEqual(packageJson.os, ["darwin", "linux"]);
+	assert.deepEqual(packageJson.os, ["darwin", "linux", "android"]);
 });
 
 test("parseConfig bounds unsafe numeric input and preserves defaults", () => {

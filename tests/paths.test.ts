@@ -11,7 +11,7 @@ import {
 	resolveProjectPaths,
 	sanitizeProjectKey,
 } from "../src/paths.ts";
-import { createTempDirectory } from "./helpers.ts";
+import { createTempDirectory, shellPath } from "./helpers.ts";
 
 const execFileAsync = promisify(execFile);
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -177,9 +177,12 @@ test("linked worktrees use the common checkout as the Claude-compatible root", a
 	const fakeBin = join(root, "fake-bin");
 	const fakeGit = join(fakeBin, "git");
 	const marker = join(root, "fake-git-ran");
-	const realGit = (await execFileAsync("/bin/sh", ["-c", "command -v git"])).stdout.trim();
+	const realGit = (await execFileAsync(shellPath, ["-c", "command -v git"])).stdout.trim();
 	await mkdir(fakeBin);
-	await writeFile(fakeGit, `#!/bin/sh\necho ran > ${JSON.stringify(marker)}\nexec ${JSON.stringify(realGit)} "$@"\n`);
+	await writeFile(
+		fakeGit,
+		`#!${shellPath}\necho ran > ${JSON.stringify(marker)}\nexec ${JSON.stringify(realGit)} "$@"\n`,
+	);
 	await chmod(fakeGit, 0o700);
 	const previousPath = process.env.PATH;
 	process.env.PATH = fakeBin;
