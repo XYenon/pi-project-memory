@@ -4,7 +4,7 @@ import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import test from "node:test";
 import { createChildTools } from "../src/child-tools.ts";
-import { createToolWorkspace } from "./helpers.ts";
+import { createToolWorkspace, shellPath } from "./helpers.ts";
 
 function quote(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`;
@@ -18,8 +18,8 @@ test("background Bash follows PATH order and relative entries", async (t) => {
 	await Promise.all([mkdir(first), mkdir(second), mkdir(scratchDir)]);
 	const firstCommand = join(first, "head");
 	const secondCommand = join(second, "head");
-	await writeFile(firstCommand, "#!/bin/sh\nprintf FIRST\n");
-	await writeFile(secondCommand, "#!/bin/sh\nprintf SECOND\n");
+	await writeFile(firstCommand, `#!${shellPath}\nprintf FIRST\n`);
+	await writeFile(secondCommand, `#!${shellPath}\nprintf SECOND\n`);
 	await chmod(firstCommand, 0o777);
 	await chmod(secondCommand, 0o755);
 	await symlink(secondCommand, join(env.projectRoot, "head"));
@@ -58,19 +58,21 @@ test("background tools use executables and their helpers from arbitrary host PAT
 	const commands = new Map(
 		["head", "grep", "fd", "rg"].map((name) => [
 			name,
-			execFileSync("/bin/sh", ["-c", `command -v ${name}`], { encoding: "utf8" }).trim(),
+			execFileSync(shellPath, ["-c", `command -v ${name}`], { encoding: "utf8" }).trim(),
 		]),
 	);
 	for (const [name, executable] of commands) {
 		const target = join(bin, `${name}-target`);
 		const script =
-			name === "head" ? '#!/bin/sh\nexec memory-test-helper "$@"\n' : `#!/bin/sh\nexec ${quote(executable)} "$@"\n`;
+			name === "head"
+				? `#!${shellPath}\nexec memory-test-helper "$@"\n`
+				: `#!${shellPath}\nexec ${quote(executable)} "$@"\n`;
 		await writeFile(target, script);
 		await chmod(target, 0o777);
 		await symlink(target, join(bin, name));
 	}
 	const helper = join(bin, "memory-test-helper");
-	await writeFile(helper, `#!/bin/sh\nexec ${quote(commands.get("head")!)} "$@"\n`);
+	await writeFile(helper, `#!${shellPath}\nexec ${quote(commands.get("head")!)} "$@"\n`);
 	await chmod(helper, 0o777);
 	await writeFile(join(projectRoot, "source.md"), "HOST_PATH_MARKER\n");
 	const previousPath = process.env.PATH;

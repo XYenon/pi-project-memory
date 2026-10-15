@@ -52,9 +52,10 @@ const command = request.name === "grep" ? "rg" : "fd";
 const bin = join(request.directory, "bin");
 await mkdir(bin, { mode: 0o700 });
 const quote = (value) => `'${value.replaceAll("'", `'\\''`)}'`;
+const shell = process.platform === "android" ? "/system/bin/sh" : "/bin/sh";
 await writeFile(
 	join(bin, command),
-	`#!/bin/sh\nexec ${quote(process.execPath)} ${quote(fileURLToPath(import.meta.url))} --executable "$@"\n`,
+	`#!${shell}\nexec ${quote(process.execPath)} ${quote(fileURLToPath(import.meta.url))} --executable "$@"\n`,
 	{ mode: 0o700 },
 );
 process.env.PI_MEMORY_SEARCH_POLICY = JSON.stringify(request);

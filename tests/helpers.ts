@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
 
+export const shellPath = process.platform === "android" ? "/system/bin/sh" : "/bin/sh";
+
 export async function createTempDirectory(t: TestContext, prefix: string): Promise<string> {
 	const root = await mkdtemp(join(tmpdir(), prefix));
 	t.after(() => rm(root, { recursive: true, force: true }));
