@@ -180,9 +180,9 @@ instruction loader 在 auto-memory 开启且权限允许时：
 
 1. 计算 `MEMORY.md` 路径；
 2. 可从 `CLAUDE_COWORK_MEMORY_INDEX_CONTENT` 使用预注入内容，否则读文件/Storage V5；
-3. 索引缺失但存在可安全链接的topic时，条件性生成不超过普通窗口约80%的索引，并通过临时文件和exclusive create发布；
+3. 索引缺失但存在可安全链接的 topic 时，条件性生成不超过普通窗口约 80% 的索引，并通过临时文件和 exclusive create 发布；
 4. 去掉 auto-memory 不应进入 prompt 的包装内容；
-5. 调用 `cDn()`，按 200 行和约25KB裁剪；
+5. 调用 `cDn()`，按 200 行和约 25KB 裁剪；
 6. 以类型 `AutoMem` 加入与 `CLAUDE.md` 同一套 instruction file 集合。
 
 `cDn()` 会在截断后的内容尾部附加 WARNING，告诉模型有多少行被裁掉，并要求压缩索引。它同时检查行数和 size；先截到 200 行，再截到约 25,000 的换行边界。值得注意的是：`vlt()` 虽然把字段命名为 `byteCount`，实际值是 trimmed JavaScript string 的 `.length`，即 UTF-16 code units；最终 splice 也使用 JavaScript 字符串 offset。因此 ASCII 内容约等于 25KB，而大量多字节字符时实际 UTF-8 字节数可以明显超过 25,000。
@@ -265,7 +265,7 @@ file-mode selector 的 system prompt 要求最多选择 5 个明确相关的文�
 
 提示词还要求在使用 memory 回答前检查当前代码/外部资源；memory 与当前事实冲突时，以当前观察为准并修正 memory。
 
-普通文本 Read 的状态由最近一次返回更新。`QIr()` 保存该页面的 content、mtime、offset 和 limit，普通显式分页不会仅因没有覆盖全文件而设置 `isPartialView`。自动 token 截断才设置该标记。Write 和 Edit 的已读校验检查该状态及 `isPartialView`，没有普通分页范围累积的控制流。相关固定版本证据见[Read 状态与 stale 门槛](research-evidence.md#read-状态与-stale-门槛)。
+普通文本 Read 的状态由最近一次返回更新。`QIr()` 保存该页面的 content、mtime、offset 和 limit，普通显式分页不会仅因没有覆盖全文件而设置 `isPartialView`。自动 token 截断才设置该标记。Write 和 Edit 的已读校验检查该状态及 `isPartialView`，没有普通分页范围累积的控制流。相关固定版本证据见 [Read 状态与 stale 门槛](research-evidence.md#read-状态与-stale-门槛)。
 
 ### 5.6 Post-turn memory extraction
 

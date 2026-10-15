@@ -136,7 +136,7 @@ reference -> usually team
   current conversation context.
 ```
 
-还有一条重要限制：即使用户要求“记住”上述内容，也应询问其中什么是**surprising/non-obvious**，只保存该部分。
+还有一条重要限制：即使用户要求“记住”上述内容，也应询问其中什么是 **surprising/non-obvious**，只保存该部分。
 
 ### 2.4 保存格式与索引提示词
 

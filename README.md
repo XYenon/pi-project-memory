@@ -11,7 +11,7 @@ Pi Project Memory 是 Pi 的项目自动记忆扩展。它把每个项目的长�
 - **定期自动整理（Dream）**：当距离上次整理尝试满 24 小时，且期间至少有 5 个其他会话更新过时，后台 dream 会在空闲时自动整理记忆文件，合并重复内容、清理过时信息并精简索引。
 - **支持直接读写与口头指令**：你可以直接在对话中让主模型记住某条规则或忘掉某条旧记录，主模型会立即更新记忆文件；你也可以直接用外部编辑器修改记忆目录下的 `.md` 文件，扩展会自动感知外部改动。
 
-关于底层钩子机制、安全协议和与 Claude Code 2.1.296 的详细对比，请参见[设计与安全边界](docs/design-and-security.md)与[Claude Code 行为对齐说明](docs/claude-code-compatibility.md)。
+关于底层钩子机制、安全协议和与 Claude Code 2.1.296 的详细对比，请参见[设计与安全边界](docs/design-and-security.md)与 [Claude Code 行为对齐说明](docs/claude-code-compatibility.md)。
 
 ## 快速开始
 
