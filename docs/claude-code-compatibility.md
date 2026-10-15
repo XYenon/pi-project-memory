@@ -1,43 +1,43 @@
-# Claude Code 行为对齐说明
+# Claude Code Behavior Alignment
 
-Pi Project Memory 以 Claude Code 2.1.296 的本地私有文件模式（local private file mode）自动记忆为参照。本文记录客户端可观察行为的对齐范围、静态逆向依据、Pi 宿主适配方案以及有意保留的差异。普通用户无需阅读本文。
+Pi Project Memory uses the local private file mode auto-memory of Claude Code 2.1.296 as its reference. This document records the scope of alignment for client-observable behavior, the static reverse engineering evidence, the adaptation plan for the Pi host, and the differences that were kept on purpose. Regular users do not need to read this document.
 
-## 证据范围与研究材料
+## Evidence scope and research materials
 
-分析对象是 `@anthropic-ai/claude-code@2.1.296` 的 darwin arm64 发布物（Bun 单文件可执行程序）。分析过程先从二进制中静态提取 Bun 模块图，再结合逆向分析工具（REA）与源码级审计定位自动记忆相关代码，全程未执行目标二进制程序。
+The analysis covers the darwin arm64 release of `@anthropic-ai/claude-code@2.1.296`, which is a single-file Bun executable. The analysis first extracted the Bun module graph statically from the binary. Then it used a reverse engineering analysis tool (REA) and a source-level audit to locate the code related to auto-memory. The target binary was never executed.
 
-本文结论只覆盖客户端可执行文件中可观察到的确定性逻辑与提示词模板，不推断 Anthropic 服务端的私有特性开关（feature flags）、内部模型路由、向量 embedding、重排序（ranking）或 `memory_search` 服务端实现。
+The conclusions in this document cover only the deterministic logic and prompt templates that can be observed in the client executable. They do not infer Anthropic server-side private feature flags, internal model routing, vector embedding, ranking, or the server implementation of `memory_search`.
 
-逆向分析报告、原始提示词摘录和 chunk 级校验依据保存在仓库的 `docs/research/` 目录中。`docs/research/` 只记录 Claude Code 的目标行为与证据，所有与 Pi Project Memory 相关的实现、适配和差异说明均记录在本文及 `docs/design-and-security.md`、`docs/development.md` 中：
+The reverse engineering report, the raw prompt excerpts, and the chunk-level verification evidence are stored in the repository's `docs/research/` directory. The `docs/research/` directory only records the target behavior and evidence for Claude Code. All implementation, adaptation, and difference notes for Pi Project Memory are recorded in this document, [design and security boundaries](design-and-security.md), and [development guide](development.md). The research materials are available only in Chinese:
 
-- [Claude Code 2.1.296 Memory 实现逆向分析](research/implementation-analysis.md)
-- [提示词、工具定义与关键函数附录](research/prompt-tools-and-functions.md)
-- [研究证据说明](research/research-evidence.md)
+- [Claude Code 2.1.296 Memory implementation analysis (Chinese)](research/implementation-analysis.md)
+- [Prompt, tool definition, and key function appendix (Chinese)](research/prompt-tools-and-functions.md)
+- [Research evidence notes (Chinese)](research/research-evidence.md)
 
-## 已对齐的核心行为
+## Core behaviors that are aligned
 
-### 1. 文件布局与数据模型
+### 1. File layout and data model
 
-- 采用 `MEMORY.md` 索引文件加独立 topic Markdown 文件的目录结构。
-- `MEMORY.md` 只保存一行一条的链接指针（建议不超过 150 个字符），不含 frontmatter，也不直接存放记忆正文。
-- 每个 topic 文件使用 YAML frontmatter 保存 `name`、`description` 和 `metadata.type`（支持 `user`、`feedback`、`project`、`reference` 四种类型；同时兼容像 Claude 一样将顶层非标准 `type` / `modified` 字段拍平归入 `metadata`，且显式 `metadata.type` 优先级更高）。
+- The directory structure uses a `MEMORY.md` index file and separate topic Markdown files.
+- `MEMORY.md` stores only one link pointer per line (keep each line under 150 characters). It has no frontmatter and does not store memory content directly.
+- Each topic file uses YAML frontmatter to store `name`, `description`, and `metadata.type`. The four supported types are `user`, `feedback`, `project`, and `reference`. Like Claude, the extension also accepts top-level non-standard `type` and `modified` fields, and moves them into `metadata`. An explicit `metadata.type` takes priority.
 
-### 2. 项目 Key 与 Worktree 归属
+### 2. Project key and worktree ownership
 
-- 项目根目录优先解析规范化后的 Git 根目录；若当前位于 `git worktree` 关联工作树且公共 Git 目录名为 `.git`，则归属到拥有该公共 `.git` 目录的主检出根目录，使多个关联工作树共享同一份项目记忆。非 Git 目录使用规范化后的当前工作目录。
-- 项目 Key 将根路径中的所有非 `[A-Za-z0-9]` 字符替换为 `-`。若替换后长度超过 200 个字符，则保留前 200 个字符并追加 32 位有符号 Java `String.hashCode` 的 base36 后缀。
+- The project root is the canonical Git root when one is available. If the directory is a linked `git worktree` and its common Git directory is named `.git`, the project belongs to the main checkout that owns that common `.git` directory. This lets several linked worktrees share one project memory. For a directory that is not in Git, the canonical current working directory is used.
+- The project key replaces every character in the root path that is not `[A-Za-z0-9]` with `-`. If the result is longer than 200 characters, the extension keeps the first 200 characters and appends a base36 suffix from the 32-bit signed Java `String.hashCode`.
 
-### 3. 索引裁剪、自动补建与取回窗口
+### 3. Index trimming, automatic backfill, and recall window
 
-- **索引窗口**：`MEMORY.md` 的注入上限为 200 行和 25,000 个 JavaScript UTF-16 代码单元（即字符串 `.length`，先达到者生效；超限时按换行符边界截断并在末尾附加 `WARNING: MEMORY.md was truncated` 提示）。虽然提示词文案称之为约 25KB，但实际代码按 UTF-16 代码单元计数。当 `MEMORY.md` 缺失且目录内存在可安全链接的 topic 文件时，扩展会按不超过窗口 80%（160 行、20,000 个代码单元）的容量并使用独占创建（`wx` no-clobber）自动补建初始索引。
-- **单文件取回窗口**：每个被选中的 topic 文件最多读取前 200 行和 4,096 UTF-8 字节（先达到者生效）。读取按完整 UTF-8 行累加，当下一行超出 4,096 字节时立即停止，绝不注入半行或截断的多字节字符。
-- **异步预取与延迟注入**：Selector 在 Pi 接受最终用户文本后异步启动。普通请求在 `before_agent_start` 启动，排队或流式用户消息在实际进入主会话（`message_end`）时启动，原始 `input` 事件不发起模型请求。普通请求开始前最多等待预取 2 秒；超过 2 秒才完成的结果会通过 Pi 的 `steer` 消息加入下一次模型调用。此外，普通请求会标记下一条用户消息已预取，当 Pi 紧接着追加图片尺寸归一化后的用户消息时不会重复调用 selector，而后续独立的排队消息仍会正常触发各自的 selector。
-- **会话分支预算与已读抑制**：每个会话分支最多累计自动取回 61,440 个 UTF-16 代码单元。预算只统计净化后的 topic 正文以及文件被截断时实际附加的截断说明，不统计 `<system-reminder>` 包装、文件路径标题、过期提示和首条引导语。达到上限后停止调用 selector。当主 Agent 通过普通 `read` 工具完整读取某个 topic 文件后，该文件在当前分支不再自动取回；局部读取（`offset > 1` 或发生自动截断）不会触发抑制，且文件在磁盘上被修改后可重新进入候选。
-- **文本净化**：索引注入、取回注入与持久化写入都会移除危险控制字符、格式字符与不可见字符，并将保留的提示词标签（如 `<system-reminder>`、`<tool_use>` 等及其 Unicode 同形异义变体）转义为 `&lt;`，且不会引入替换字符 `U+FFFD`。
+- **Index window**: The `MEMORY.md` injection limit is 200 lines and 25,000 JavaScript UTF-16 code units. The limit is measured with the string `.length` of JavaScript, and the first limit reached applies. When the limit is exceeded, the index is cut at a line break, and the warning `WARNING: MEMORY.md was truncated` is added at the end. The prompt text describes this limit as about 25 KB, but the code counts UTF-16 code units. When `MEMORY.md` is missing and the directory has topic files that can be safely linked, the extension backfills an initial index automatically. The backfill uses no more than 80% of the window (160 lines and 20,000 code units). It creates the file with exclusive creation (`wx`, no-clobber).
+- **Single-file recall window**: Each selected topic file is read for at most its first 200 lines and 4,096 UTF-8 bytes, whichever limit is reached first. The reader adds complete UTF-8 lines. When the next line would exceed 4,096 bytes, it stops right away. It never injects a partial line or a cut multi-byte character.
+- **Asynchronous prefetch and delayed injection**: The selector starts asynchronously after Pi accepts the final user text. A normal request starts it in `before_agent_start`. A queued or streamed user message starts it when the message enters the main session (`message_end`). The raw `input` event does not start a model request. Before a normal request starts, the extension waits up to 2 seconds for the prefetch. A result that finishes after 2 seconds is added to the next model call as a Pi `steer` message. A normal request also marks the next user message as already prefetched. When Pi then appends a user message with a normalized image size, the selector is not called again. Later independent queued messages still trigger their own selector calls.
+- **Branch budget and read suppression**: Each session branch can accumulate at most 61,440 UTF-16 code units of automatic recall. The budget counts only the sanitized topic text and the truncation note added when a file is cut. It does not count the `<system-reminder>` wrapper, file path headings, staleness reminders, or the first guidance message. When the limit is reached, the selector stops being called. When the main agent fully reads a topic file with the normal `read` tool, the file is no longer recalled automatically on the current branch. A partial read (`offset > 1` or an automatic truncation) does not trigger suppression. If the file is modified on disk, it can become a candidate again.
+- **Text sanitization**: Index injection, recall injection, and persisted writes all remove dangerous control characters, format characters, and invisible characters. They escape reserved prompt tags such as `<system-reminder>` and `<tool_use>`, including their Unicode lookalike variants, to `&lt;`. The process never introduces the replacement character `U+FFFD`.
 
-### 4. Selector 目录格式与输出 Schema
+### 4. Selector directory format and output schema
 
-候选目录格式为 `- [type] filename (mtime ISO): description`（当 `type` 未知时省略 `[type]` 前缀）。输出 JSON Schema 与 Claude Code 2.1.296 完全一致：
+The candidate directory uses the format `- [type] filename (mtime ISO): description`. When the `type` is unknown, the `[type]` prefix is omitted. The output JSON Schema matches Claude Code 2.1.296 exactly:
 
 ```json
 {
@@ -53,102 +53,102 @@ Pi Project Memory 以 Claude Code 2.1.296 的本地私有文件模式（local pr
 }
 ```
 
-Selector 默认最大输出为 512 token，单次最多返回 5 个文件名（若模型返回了带 `[project]` 等类型前缀的文件名，解析器会自动剥离前缀并校验其是否存在于候选列表中）。扩展在当前会话分支中保留 selector 的历史查询与回答对，避免在同一对话中重复选择相同文件。
+The selector returns at most 512 tokens by default, and it returns at most 5 file names in one call. If the model returns a file name with a type prefix such as `[project]`, the parser removes the prefix automatically and checks that the file exists in the candidate list. The extension keeps the selector's query and answer pairs in the current session branch. This prevents the same file from being selected again in the same conversation.
 
-### 5. 索引、扫描与 Selector 的容错边界
+### 5. Fault tolerance for index, scan, and selector
 
-- **`readIndex()` 容错**：作为可选的系统上下文加载入口，当 `MEMORY.md` 缺失时会尝试自动补建；若读取或补建失败（例如 `MEMORY.md` 是悬空符号链接或目录），`readIndex()` 会静默返回空字符串 `""` 让主会话继续运行，而底层 `readRegularFileNoFollow()` 和 `backfillIndex()` 仍会向直接调用方抛出异常。这一行为对应 `chunk-sfn1dbxq.js` 中 `XNe()`（`35595` 行起）与 `BJn()`（`34548` 行起）的容错逻辑。
-- **`scanTopics()` 容错**：对单个文件和目录整体失败分别处理。单个文件打开、读取或 UTF-8 解码失败时跳过该文件并保留其余有效 topic；目录无法遍历等整体失败时，公开入口 `scanTopics()` 返回空数组 `[]`。有效文件按 `mtime` 从新到旧排序并截取前 200 个。同时保留最多 16 个文件并发读取的上限，防止在低文件描述符限制下耗尽句柄。这一行为对应 `chunk-n3ykh62m.js` 中 `Hdr()`（`10285` 行起，使用 `Promise.allSettled()`）与 `dVe()`（`10348` 行起）的逻辑。
-- **Selector 失败边界**：当请求报错、输出被长度截断（`length`）、缺少文本、JSON 解析失败或 schema 校验不通过时，selector 边界会发出 warning 通知并返回空数组 `[]`；当请求被取消（`aborted`）时静默返回 `[]`。若原生结构化输出请求已成功返回但内容格式不合法，直接返回 `[]` 而不再发起第二次工具请求。这一行为对应 `chunk-sfn1dbxq.js:171105` 起的异常处理逻辑。
+- **`readIndex()` fault tolerance**: As an optional entry point for loading system context, `readIndex()` tries to backfill when `MEMORY.md` is missing. If reading or backfilling fails (for example, when `MEMORY.md` is a dangling symbolic link or a directory), `readIndex()` silently returns an empty string `""` so the main session can keep running. The lower-level `readRegularFileNoFollow()` and `backfillIndex()` still throw exceptions to direct callers. This behavior matches the fault tolerance logic of `XNe()` (starting at line 35595) and `BJn()` (starting at line 34548) in `chunk-sfn1dbxq.js`.
+- **`scanTopics()` fault tolerance**: The extension handles failures of single files and of the whole directory separately. If opening, reading, or UTF-8 decoding of one file fails, that file is skipped and the other valid topics are kept. If the whole directory cannot be traversed, the public entry point `scanTopics()` returns an empty array `[]`. Valid files are sorted from newest to oldest by `mtime`, and the first 200 are kept. The extension still reads at most 16 files at the same time, so it does not run out of handles when the file descriptor limit is low. This behavior matches `Hdr()` (starting at line 10285 of `chunk-n3ykh62m.js`, which uses `Promise.allSettled()`) and `dVe()` (starting at line 10348).
+- **Selector failure boundary**: When a request fails, the output is cut off by length (`length`), the text is missing, JSON parsing fails, or schema validation fails, the selector boundary sends a warning notification and returns an empty array `[]`. When a request is cancelled (`aborted`), it returns `[]` silently. If a native structured output request returns successfully but the content format is invalid, the selector returns `[]` directly and does not make a second tool request. This behavior matches the error handling logic that starts at line 171105 of `chunk-sfn1dbxq.js`.
 
-### 6. 回合后提取（Extraction）
+### 6. Post-turn extraction
 
-- **消息上下文与签名处理**：Extractor 处理提取游标（cursor）之后的完整 `user`、`assistant` 和 `toolResult` 消息（保留助手的 `toolCall` 以及压缩/分支摘要）。当 extractor 与历史助手消息使用完全相同的具体 `provider`、`api` 和 `model` 时保留 `thinking` 块及签名；跨模型时删除 `thinking` 块并剥离文本与工具调用上的 provider 专属签名。
-- **提示词补齐**：启动 extractor（或 dream）时，如果父会话系统提示词中尚未包含自动记忆规则（例如恢复会话后立即手动运行 `/memory extract`），扩展会自动补齐包含当前 memory 目录、记忆类型、排除项和 frontmatter 规则的主记忆提示词；若父提示词已包含则直接复用，避免重复拼接。
-- **新输入与合并运行**：对齐 Claude Code 本地文件模式，新用户输入到达时不会中止正在运行的 extractor，也不会剥夺其写入资格。提取控制器会在当前提取结束后将新增对话合并为一次后续提取（trailing extraction）。会话压缩前也会先等待正在准备或运行中的提取，再提取剩余未处理消息。
-- **游标前移语义**：当触发主 Agent 直接写入去重或未达到三词用户正文门槛而跳过时，游标前移到当前消息快照末尾。当后台提取子任务正常返回时（包括模型返回 API error 或达到 `maxTurns` 上限），游标同样前移到本次输入快照末尾；只有当子任务抛出异常、被中止或因信任/配置变更失效时才保留原游标以便重试。提取期间新到达的消息不会被本次游标前移消费。Claude MCP 模式下的连续三次未完成才前移游标规则不适用于本地文件模式。
+- **Message context and signature handling**: The extractor processes the complete `user`, `assistant`, and `toolResult` messages after the extraction cursor. It keeps the assistant's `toolCall` entries and the compaction or branch summaries. When the extractor and the historical assistant messages use exactly the same concrete `provider`, `api`, and `model`, the extension keeps the `thinking` blocks and their signatures. Across models, it deletes the `thinking` blocks and strips the provider-specific signatures on text and tool calls.
+- **Prompt completion**: When the extractor or dream starts, the extension checks whether the parent system prompt already contains the auto-memory rules. For example, the rules may be missing after a session is restored and `/memory extract` is run by hand. If they are missing, the extension adds the main memory prompt. That prompt includes the current memory directory, the memory types, the exclusions, and the frontmatter rules. If the parent prompt already contains them, the extension reuses it and does not concatenate them again.
+- **New input and merged runs**: To match the local file mode of Claude Code, new user input does not stop a running extractor, and it does not take away that extractor's write permission. The extraction controller merges the new conversation into one later extraction (trailing extraction) that runs after the current extraction ends. Before session compaction, the extension also waits for any extraction that is being prepared or running, and then extracts the remaining unprocessed messages.
+- **Cursor advance rules**: When the main agent's direct write deduplicates the extraction, or when the user prose does not reach the three-word threshold and the extraction is skipped, the cursor moves to the end of the current message snapshot. When the background extraction sub-task returns normally, including when the model returns an API error or reaches the `maxTurns` limit, the cursor also moves to the end of this run's input snapshot. The cursor stays in place only when the sub-task throws an exception, is aborted, or becomes invalid because of a trust or configuration change, so the run can be retried. Messages that arrive during the extraction are not consumed by this cursor advance. The MCP mode rule for advancing the cursor after three consecutive incomplete runs does not apply to the local file mode.
 
-### 7. 定期整理（Dream）与退出等待（Shutdown）
+### 7. Periodic consolidation (Dream) and shutdown wait
 
-- **触发与独立派发**：在正常结束的轮次（`agent_settled`）后检查，默认要求距上次整理尝试满 24 小时且至少有 5 个其他会话更新，进程内扫描节流为 10 分钟，子 Agent 工具循环上限为 50 轮。Extractor 与 dream 从同一轮次独立派发，分别使用 `extract.lock` 和 `dream.lock`。
-- **尝试时间与回滚语义**：取得 `dream.lock` 并开始任务时立即记录尝试时间 `lastDreamAt`，后续的 24 小时门槛和其他会话计数均以该尝试时间为基准。子任务正常返回（含返回 API error 或未改动文件）或被中止（`aborted`）时均保留本次时间戳；只有当子任务在 fork 阶段未因中止而抛出异常时，才使用 compare-and-swap 回滚到旧时间戳，完成阶段（completion）的通知报错不回滚。
-- **直接只读访问原始会话目录**：调度器读取 `.jsonl` 会话文件头部信息（校验 `type: "session"` 与合法的 Pi 会话 ID 语法，并在自定义共享会话目录下按规范化项目根路径过滤），将近期会话 ID 列表放入 dream 提示词。Dream 直接只读访问原始 session 目录，不将 transcript 预复制到临时目录，也不把 ID 列表当作文件访问白名单；读取某个会话文件失败时由工具直接返回错误，不会回滚整理时间戳。这一行为对应 `chunk-kxgzv2t8.js:340` 起直接传入会话目录与近期 ID 列表的实现。
-- **退出等待**：会话退出（`session_shutdown`）时，扩展最多等待后台维护任务 60 秒，超时后触发中止信号。
+- **Trigger and independent dispatch**: The check runs after a normal turn ends (`agent_settled`). By default, it requires at least 24 hours since the last consolidation attempt and at least 5 other sessions with updates. The in-process scan throttle is 10 minutes, and the sub-agent tool loop is limited to 50 turns. The extractor and dream are dispatched independently from the same turn. They use `extract.lock` and `dream.lock`.
+- **Attempt time and rollback**: When the extension acquires `dream.lock` and starts the task, it records the attempt time `lastDreamAt` at once. The later 24-hour threshold and the other-session count both use this attempt time as the baseline. The timestamp is kept when the sub-task returns normally (including when it returns an API error or changes no files) or when it is aborted (`aborted`). The timestamp is rolled back to the old value through compare-and-swap only when the sub-task throws an exception during the fork step without being aborted. An error reported in the completion step does not trigger a rollback.
+- **Direct read-only access to the original session directory**: The scheduler reads the header information of `.jsonl` session files. It checks `type: "session"` and the valid Pi session ID syntax. In a custom shared session directory, it also filters by canonical project root. The list of recent session IDs goes into the dream prompt. Dream reads the original session directory directly and read-only. It does not copy transcripts to a temporary directory first, and it does not treat the ID list as a file access allowlist. If reading one session file fails, the tool returns the error directly and the consolidation timestamp is not rolled back. This behavior matches the implementation that passes the session directory and the recent ID list directly, starting at line 340 of `chunk-kxgzv2t8.js`.
+- **Shutdown wait**: When the session exits (`session_shutdown`), the extension waits up to 60 seconds for background maintenance tasks. If the wait times out, it sends the abort signal.
 
-## 提示词与后台工具对齐
+## Prompt and background tool alignment
 
-### 1. 静态提示词基线规则
+### 1. Static prompt baseline rules
 
-主 Agent 自动记忆提示词、selector 提示词、extractor 提示词和 dream 提示词均以 Claude Code 2.1.296 本地私有文件模式的运行时文本为固定基线（由 `tests/prompts.test.ts` 与 `tests/fixtures/prompts/*.txt` 逐字校验）。静态文本只做以下四类替换：
+The main agent auto-memory prompt, selector prompt, extractor prompt, and dream prompt all use the runtime text of Claude Code 2.1.296 local private file mode as their fixed baseline. `tests/prompts.test.ts` and `tests/fixtures/prompts/*.txt` check that baseline word for word. The static text allows only four kinds of replacement:
 
-1. 将指令文件名 `CLAUDE.md` 替换为 `AGENTS.md`。
-2. 将工具名称、参数名或字段名替换为 Pi 原生接口（如 `read`、`write`、`edit`、`find`、`grep`、`bash`）。
-3. 删除仅服务于明确不支持功能（如团队共享存储、MCP 记忆工具等）的专属段落。
-4. 将提示词中的产品名 `Claude Code` 替换为中性称呼 `the agent`。
+1. Replace the instruction file name `CLAUDE.md` with `AGENTS.md`.
+2. Replace tool names, parameter names, and field names with Pi native interfaces (such as `read`, `write`, `edit`, `find`, `grep`, and `bash`).
+3. Remove sections that only serve features that are explicitly unsupported, such as team shared storage and MCP memory tools.
+4. Replace the product name `Claude Code` in the prompt with the neutral term `the agent`.
 
-当 selector 使用受约束工具模式时，允许在 selector 基线末尾追加固定指令：`Call the select_memories tool exactly once with the JSON object you would otherwise return.`。运行时的目录路径、消息条数和近期 session ID 列表属于动态插值，按 Pi 实际运行值填入。
+When the selector uses a constrained tool mode, the fixed instruction `Call the select_memories tool exactly once with the JSON object you would otherwise return.` may be appended to the end of the selector baseline. The runtime values, such as the directory path, the number of messages, and the list of recent session IDs, are dynamic and are filled in with the values from the actual run.
 
-### 2. 后台工具接口与 Codemode 适配
+### 2. Background tool interface and Codemode adaptation
 
-后台子 Agent 不仿造 Claude Code 的文件工具名称与参数结构，而是直接包装并复用 Pi 原生的六个工具工厂：`read`、`find`、`grep`、`write`、`edit` 和 `bash`。因此，`read` 的分页窗口、`find` / `grep` 的参数格式以及 `edit` 的 `edits[]` 数组结构均以 Pi 为准；不提供 Claude 的 `Glob` 工具、`Grep` 的 `output_mode`、`Read` 的 PDF `pages` / `allow_large` 参数，也不支持读取 PDF 或 Jupyter Notebook。
+Background sub-agents do not imitate Claude Code's file tool names or parameter structures. They wrap and reuse the six Pi native tool factories directly: `read`, `find`, `grep`, `write`, `edit`, and `bash`. So the paging window of `read`, the parameter format of `find` and `grep`, and the `edits[]` array structure of `edit` all follow Pi. Claude's `Glob` tool, `output_mode` for `Grep`, and the PDF `pages` and `allow_large` parameters for `Read` are not provided. PDF and Jupyter Notebook reading is not supported.
 
-为了消除父会话系统提示词中工具列表与后台任务工具列表的差异，后台请求会在系统提示词末尾追加一段独立的 `## Background memory task tools` 说明，列出当前任务实际声明的工具及其访问限制，同时完整保留父提示词中的用户指令、项目指令与自动记忆规则。
+To remove the mismatch between the tool list in the parent session's system prompt and the tool list of the background task, each background request appends a separate `## Background memory task tools` section to the end of the system prompt. That section lists the tools this task declares and their access limits. The user instructions, project instructions, and auto-memory rules from the parent prompt remain complete.
 
-当主会话启用了 `codemode` 时，extractor 和 dream 也会在任务内部启用 Pi 原生 `codemode`，并继承主会话的 `on` / `only` 模式与 `inlineBudget`。脚本内只能调用当前任务的六个受限工具，同样受路径、读取基线、项目信任与代次检查约束，且任务内的内存 store 与父会话完全隔离。这是面向 Pi 执行环境的工具调用适配，不改变上述四份固定提示词基线。
+When the main session enables `codemode`, the extractor and dream also enable Pi's native `codemode` inside the task. They inherit the main session's `on` or `only` mode and its `inlineBudget`. Scripts can call only the six restricted tools of the current task. These calls are subject to the same checks for path, read baseline, project trust, and generation. The in-memory store of the task is fully isolated from the parent session. This is an adaptation of tool calls for the Pi runtime. It does not change the four fixed prompt baselines described above.
 
-### 3. 后台工具的工作目录依据
+### 3. Working-directory basis for background tools
 
-在 Claude Code 2.1.296 中，本地 extraction（`chunk-9mazb6vn.js:912`）和 dream（`chunk-kxgzv2t8.js:356`）均通过通用 `MC()` 函数（`chunk-sfn1dbxq.js:116467`）调用 `Rir()`（同文件 `116301` 行）创建后台 fork 上下文，默认直接继承父会话的 session 与工作目录，并未针对不同后台角色或读写操作切换工作目录；memory 目录仅传给权限检查函数 `p5n()`（`chunk-9mazb6vn.js:429`）用于限制写入范围。
+In Claude Code 2.1.296, local extraction (`chunk-9mazb6vn.js:912`) and dream (`chunk-kxgzv2t8.js:356`) both call the general `MC()` function (`chunk-sfn1dbxq.js:116467`), which calls `Rir()` (same file, line 116301) to create the background fork context. By default, that context inherits the parent session's session and working directory directly. It does not switch the working directory for different background roles or for read and write operations. The memory directory is passed only to the permission check function `p5n()` (`chunk-9mazb6vn.js:429`), which limits the write scope.
 
-对齐这一机制，Pi Project Memory 将任务开始时父会话的 `ctx.cwd` 统一作为后台 `read`、`find`、`grep`、`write`、`edit` 和 `bash` 的工作目录基准，extractor 与 dream 完全一致：
+To match this mechanism, Pi Project Memory uses the parent session's `ctx.cwd` at task start as the working directory base for background `read`, `find`, `grep`, `write`, `edit`, and `bash`. The extractor and dream behave the same way:
 
-- 当从仓库子目录或关联 worktree 启动 Pi 时，规范化项目根目录（`projectRoot`）决定记忆归属身份，而 `ctx.cwd` 决定工具相对路径的解析起点（`find` 和 `grep` 省略 `path` 时也从 `ctx.cwd` 搜索）。
-- Claude 的 `Read`、`Write`、`Edit` 接口要求传入绝对路径；Pi 原生工具支持相对路径，并统一相对于 `ctx.cwd` 解析。因此后台模型修改记忆文件时，应传入绝对路径或从 `ctx.cwd` 指向 memory 目录的相对路径（直接传入 `"topic.md"` 会解析到 `ctx.cwd/topic.md`，不会自动重定向到 memory 目录）。
+- When Pi starts from a repository subdirectory or a linked worktree, the canonical project root (`projectRoot`) decides the memory identity. `ctx.cwd` decides where relative tool paths start. `find` and `grep` also search from `ctx.cwd` when `path` is omitted.
+- Claude's `Read`, `Write`, and `Edit` interfaces require absolute paths. Pi's native tools support relative paths and resolve them against `ctx.cwd`. So when a background model changes a memory file, it should pass an absolute path, or a path relative to `ctx.cwd` that points to the memory directory. A bare `"topic.md"` resolves to `ctx.cwd/topic.md`. It is not redirected to the memory directory automatically.
 
-## 针对 Pi 宿主的适配与细节取舍
+## Adaptations and trade-offs for the Pi host
 
-下表汇总了将 Claude Code 2.1.296 本地记忆机制迁移到 Pi 宿主时的具体取舍及实现方式：
+The table below summarizes the trade-offs and implementation methods used when the Claude Code 2.1.296 local memory mechanism moves to the Pi host.
 
-### 输入过滤与自动提取
+### Input filtering and automatic extraction
 
-| Claude Code 2.1.296 机制               | 策略         | Pi Project Memory 的实现方式与理由                                                                                                                                                         |
-| -------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 只处理主 Agent 的真实用户查询          | 适配宿主事件 | 仅对主会话实际提交给模型的用户文本启动 selector，排除工具结果、记忆更新/取回消息、后台任务请求与本地 `/memory` 命令。                                                                      |
-| 内部 query source 标识过滤             | 适配宿主事件 | 使用 Pi 公开的 `before_agent_start`（普通请求最终 prompt）和 `message_end`（排队/流式用户消息）识别有效文本；不在原始 `input` 事件中调用模型，防止被其他扩展改写或拦截前发起无效请求。     |
-| Selector 内部空白门槛与条件性 CJK 分支 | 保留传统路径 | 要求 `/\s/.test(query.trim())` 为真，单个英文词或无空格中文不启动 selector。Claude 的无空格 CJK 例外与 BM25 共用 `tengu_mill_orange` 开关，本项目不含 BM25，故保持传统空白门槛。           |
-| 游标后已有直接记忆写入则跳过提取       | 保留并适配   | 检查游标之后主 Agent 是否有针对 memory 目录的成功 `write` 或 `edit` 调用；若有则跳过自动提取并前移游标，失败调用或目录外写入不跳过。                                                       |
-| 三词用户正文（user prose）提取门槛     | 保留         | 要求游标后至少有一条真实用户消息的字符串正文或单个独立 `text` 块按 `/\s+/` 拆分后达到 3 个非空词（跨消息或跨块不合并，无独立中文分词）。未达标时自动提取跳过并前移游标；手动提取同受约束。 |
-| 本地文件模式游标前移与新输入合并       | 保留         | 跳过或后台子任务返回（含 API error / 达到 `maxTurns`）时前移游标，子任务抛出异常时保留游标；运行期间的新输入标记为 `trailingExtraction`，不取消当前任务，也不被当前游标消费。              |
-| MCP 提取模式的连续三次未完成阈值       | 排除         | 连续三次未完成才前移游标属于 MCP 传输分支（`chunk-9mazb6vn.js` 中的 `y()`），不适用于本地私有文件模式。                                                                                    |
+| Claude Code 2.1.296 mechanism                                             | Strategy              | How Pi Project Memory implements it and why                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Only real user queries from the main agent are processed                  | Adapt host events     | The selector starts only for user text that the main session actually submits to the model. It excludes tool results, memory update and recall messages, background task requests, and local `/memory` commands.                                                                                                                                                                                                |
+| Filtering by internal query source identifiers                            | Adapt host events     | It uses Pi's public `before_agent_start` (the final prompt of a normal request) and `message_end` (queued or streamed user messages) to identify valid text. It does not call a model from the raw `input` event, so other extensions cannot rewrite or block the text after an invalid request has already started.                                                                                            |
+| Selector whitespace threshold and conditional CJK branch                  | Keep traditional path | It requires `/\s/.test(query.trim())` to be true. A single English word or Chinese text without spaces does not start the selector. Claude's no-space CJK exception shares the `tengu_mill_orange` switch with BM25. This project does not include BM25, so it keeps the traditional whitespace threshold.                                                                                                      |
+| Skip extraction when the main agent already wrote memory after the cursor | Keep and adapt        | Checks whether the main agent made a successful `write` or `edit` call on the memory directory after the cursor. If it did, automatic extraction is skipped and the cursor advances. Failed calls and writes outside the directory do not cause a skip.                                                                                                                                                         |
+| Three-word threshold for user prose in extraction                         | Keep                  | Requires at least one real user message after the cursor, with string content or a single standalone `text` block, that has at least 3 non-empty words after splitting on `/\s+/`. Blocks and messages are not merged, and there is no separate Chinese word segmentation. If the threshold is not met, automatic extraction is skipped and the cursor advances. Manual extraction is subject to the same rule. |
+| Cursor advance and merging of new input in local file mode                | Keep                  | The cursor advances when a run is skipped or when a background sub-task returns (including an API error or reaching `maxTurns`). It stays in place when the sub-task throws an exception. New input during a run is marked `trailingExtraction`. It does not cancel the current task, and the current cursor does not consume it.                                                                               |
+| Three consecutive incomplete MCP runs before the cursor advances          | Exclude               | The rule for advancing the cursor only after three consecutive incomplete runs belongs to the MCP transport branch (`y()` in `chunk-9mazb6vn.js`). It does not apply to the local private file mode.                                                                                                                                                                                                            |
 
-### 上下文注入、工具状态与后台运行
+### Context injection, tool state, and background execution
 
-| Claude Code 2.1.296 机制                     | 策略         | Pi Project Memory 的实现方式与理由                                                                                                                                               |
-| -------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Topic 候选目录与 frontmatter 头部窗口        | 保留         | 扫描最多保留 200 个候选（按 `mtime` 降序），单文件读取前 30 行和 65,536 字节解析 frontmatter `description`、`type` 和 `modified`（缺失合法 `modified` 时回退到 `mtime`）。       |
-| 取回历史、完整读取抑制与压缩后重置           | 保留并适配   | 文件修改后解除旧已读抑制。主会话完成压缩（`session_compact`）或切换分支（`session_tree`）后，按当前活动分支重建或重置取回预算、已读集合与 selector 历史。                        |
-| 满 48 小时过期提醒与写后格式检查（lint）     | 适配消息机制 | 过期天数按 `Math.floor((Date.now() - mtimeMs) / 86_400_000) > 1` 计算（即至少满 48 小时才提醒）。提醒与写后 lint 通过 Pi 的 `tool_result` 与隐藏自定义消息注入上下文。           |
-| 普通文本读取基线（Read baseline）            | 保留         | 后台 `read` 显式传入 `offset`/`limit` 的分页读取可建立修改基线（不累计多页范围）；被 2,000 行 / 50 KiB 默认窗口自动截断或图片读取会撤销基线。主 Agent 的完整读取抑制仍单独判定。 |
-| 后台子任务不污染主会话对话记录               | 适配         | 后台工具循环不会追加到主会话 transcript；仅将文件变更摘要作为隐藏消息通知主会话，并在扩展进程内累计后台 token 与费用（通过 `/memory status` 展示）。                             |
-| 通用 fork 的私有自动压缩（compaction）       | 排除内部引擎 | 保留主会话压缩前提取、跨模型签名清理和后台 `maxTurns` / `maxTokens` 限制；不复制 Claude 内部私有 fork 压缩引擎。                                                                 |
-| 内部 API 重试策略与 Sonnet 候选模型路由      | 适配公开接口 | 通过 Pi 模型注册表调用用户配置或继承的模型。保留同一模型上原生 JSON Schema 到 `select_memories` 工具的降级重试，不跨模型切换或内置私有重试路由。                                 |
-| 权限拒绝看门狗（Permission denial watchdog） | 排除         | Pi 没有宿主级 deny/ask 权限评估器与审批弹窗，扩展通过自身的项目信任、路径包含、读取基线、文件锁和轮次上限约束后台行为。                                                          |
-| `<cc-memory>` 引用标签协议                   | 排除         | 该 XML 标签依赖 Claude 专属界面渲染与特性开关，Pi 无对应协议。                                                                                                                   |
-| 精简模式、团队挂载、专用工具存储与技能维护   | 排除         | 仅实现本地私有文件模式，不管理团队/组织共享存储、自定义 Agent 记忆、项目 skills 或 `AGENTS.md`。                                                                                 |
+| Claude Code 2.1.296 mechanism                                            | Strategy                | How Pi Project Memory implements it and why                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------------------ | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Topic candidate directory and frontmatter header window                  | Keep                    | The scan keeps at most 200 candidates, sorted by `mtime` in descending order. For each file, it reads the first 30 lines and 65,536 bytes to parse the frontmatter `description`, `type`, and `modified`. If `modified` is missing or invalid, it falls back to `mtime`.                                                            |
+| Recall history, full-read suppression, and reset after compaction        | Keep and adapt          | Changing a file removes its old read suppression. After the main session completes compaction (`session_compact`) or switches branches (`session_tree`), the recall budget, the read set, and the selector history are rebuilt or reset from the active branch.                                                                     |
+| 48-hour staleness reminder and post-write format lint (lint)             | Adapt message mechanism | Staleness days are calculated as `Math.floor((Date.now() - mtimeMs) / 86_400_000) > 1`. This means a reminder appears only after at least 48 hours. The reminder and the post-write lint are added to the context through Pi's `tool_result` and hidden custom messages.                                                            |
+| Plain-text read baseline (Read baseline)                                 | Keep                    | A background `read` with explicit `offset` and `limit` establishes a modification baseline. Multi-page ranges are not added together. A read that is automatically truncated by the default 2,000 line or 50 KiB window, or an image read, revokes the baseline. The main agent's full-read suppression is still judged separately. |
+| Background sub-tasks do not pollute the main session transcript          | Adapt                   | The background tool loop is not appended to the main session transcript. Only a summary of file changes is sent to the main session as a hidden message. The extension process accumulates background tokens and cost, which `/memory status` displays.                                                                             |
+| Private automatic compaction of the general fork                         | Exclude internal engine | The extension keeps extraction before main session compaction, cross-model signature cleanup, and the background `maxTurns` and `maxTokens` limits. It does not copy Claude's internal private fork compaction engine.                                                                                                              |
+| Internal API retry policy and Sonnet candidate model routing             | Adapt public interfaces | It calls the models that the user configured or inherited through the Pi model registry. It keeps the native JSON Schema to `select_memories` tool downgrade retry on the same model. It does not switch models across providers or use built-in private retry routes.                                                              |
+| Permission denial watchdog                                               | Exclude                 | Pi has no host-level deny and ask permission evaluator and no approval dialog. The extension limits background behavior through its own project trust, path containment, read baseline, file locks, and turn limits.                                                                                                                |
+| `<cc-memory>` reference tag protocol                                     | Exclude                 | This XML tag depends on Claude-specific interface rendering and feature flags. Pi has no matching protocol.                                                                                                                                                                                                                         |
+| Compact mode, team mounts, dedicated tool storage, and skill maintenance | Exclude                 | The extension implements only the local private file mode. It does not manage team or organization shared storage, custom agent memory, project skills, or `AGENTS.md`.                                                                                                                                                             |
 
-## 兼容性总结
+## Compatibility summary
 
-| 功能模块                                   | 兼容程度                                                   |
-| ------------------------------------------ | ---------------------------------------------------------- |
-| 本地目录结构、项目 Key、索引裁剪与自动取回 | 高兼容（对齐窗口常量、UTF-16/UTF-8 计数方式与补建逻辑）    |
-| 提示词静态基线、Selector Schema 与生命周期 | 高兼容（仅做四类声明替换与工具模式单行追加）               |
-| 用户文本过滤与提取/整理游标状态机          | 高兼容（对齐传统空白门槛、三词正文门槛与尝试时间回滚规则） |
-| 路径包含、读取基线、跨进程锁与会话记录读取 | 高兼容（采用面向本地文件系统的确定性检查与原子发布）       |
-| 后台工具名称与参数 Schema                  | Pi 原生接口（复用 Pi 原生六工具与可选任务内 codemode）     |
-| 模型路由与结构化输出降级                   | 适配 Pi 模型注册表（同模型工具降级，无跨模型回退）         |
-| 主会话通用权限系统（deny/ask）             | 不适用（Pi 无对应宿主设计，不属于本扩展职责）              |
-| BM25、账户/团队共享记忆与服务端 Memory API | 不实现                                                     |
+| Feature area                                                                     | Level of compatibility                                                                                                   |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Local directory structure, project key, index trimming, and automatic recall     | High. Matches the window constants, the UTF-16 and UTF-8 counting methods, and the backfill logic.                       |
+| Static prompt baseline, selector schema, and lifecycle                           | High. Only four kinds of declared replacement and a one-line tool mode addition on the selector are allowed.             |
+| User text filtering and extraction and consolidation cursor state machine        | High. Matches the traditional whitespace threshold, the three-word prose threshold, and the attempt time rollback rules. |
+| Path containment, read baseline, cross-process locks, and session record reading | High. Uses deterministic checks and atomic publishing designed for the local file system.                                |
+| Background tool names and parameter schemas                                      | Pi native interfaces. Reuses Pi's six native tools and the optional task-level codemode.                                 |
+| Model routing and structured output fallback                                     | Adapts to the Pi model registry. Same-model tool fallback, with no cross-model fallback.                                 |
+| General permission system for the main session (deny and ask)                    | Not applicable. Pi has no matching host design, and it is not this extension's responsibility.                           |
+| BM25, account and team shared memory, and server-side Memory API                 | Not implemented.                                                                                                         |
 
-## 目标版本边界
+## Target version boundary
 
-本项目的对齐基线固定为 `@anthropic-ai/claude-code@2.1.296`。后续 Claude Code 版本如果调整了提示词、触发门槛、窗口大小、输出 schema 或服务端协议，应先更新 `docs/research/` 下的静态逆向证据，再同步更新代码实现、测试 fixture 与本文。
+The alignment baseline for this project is fixed at `@anthropic-ai/claude-code@2.1.296`. If a later Claude Code version changes its prompts, trigger thresholds, window sizes, output schema, or server protocol, first update the static reverse engineering evidence in `docs/research/`. Then update the code, the test fixtures, and this document.

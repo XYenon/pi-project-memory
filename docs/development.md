@@ -1,19 +1,19 @@
-# 开发说明
+# Development Guide
 
-本文面向维护和修改 Pi Project Memory 的开发者。关于扩展的安装、命令和日常使用，请先阅读项目根目录下的 [README](../README.md) 与[配置参考](configuration.md)。
+This guide is for developers who maintain or change Pi Project Memory. For installation, commands, and everyday use, read the [README](../README.md) and the [configuration reference](configuration.md) first.
 
-## 开发环境
+## Development environment
 
-本项目使用 `pnpm` 管理依赖。Pi 运行时通过 `jiti` 直接加载 TypeScript 源码，因此不需要单独的编译打包步骤。
+This project uses `pnpm` to manage dependencies. The Pi runtime loads the TypeScript source directly through `jiti`, so no separate compile or bundle step is needed.
 
 ```bash
 corepack enable
 pnpm install
 ```
 
-系统环境需要安装 `bash`、`git`、`rg`（ripgrep）和 `fd`。项目将 `@earendil-works/pi-agent-core`、`@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent` 和 `typebox` 声明在 `peerDependencies`（版本范围保持 `*`），并在 `devDependencies` 中安装用于本地开发与测试的具体版本。请勿将 Pi 宿主核心包放入运行时 `dependencies`。
+Your system needs `bash`, `git`, `rg` (ripgrep), and `fd` installed. The project declares `@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, and `typebox` in `peerDependencies`, and the version range stays `*`. It installs specific versions in `devDependencies` for local development and tests. Do not put the Pi host core packages in the runtime `dependencies`.
 
-## 常用校验与测试命令
+## Common validation and test commands
 
 ```bash
 pnpm format:check
@@ -23,99 +23,103 @@ pnpm test
 pnpm check
 ```
 
-其中 `pnpm check` 是完整门禁命令，会依次执行：
+`pnpm check` is the full gate. It runs these steps in order:
 
-1. `biome check . --error-on-warnings`（检查 TypeScript 与 JSON 的格式和代码规范）
-2. `markdownlint-cli2 "**/*.md"`（检查 Markdown 规范）
-3. `prettier --check "**/*.md"`（检查 Markdown 格式）
-4. `pnpm typecheck`（运行 `tsc --noEmit` 类型检查）
-5. `pnpm test`（使用 Node.js 内置测试运行器执行 `tests/*.test.ts`）
+1. `biome check . --error-on-warnings` (checks the format and code rules for TypeScript and JSON)
+2. `markdownlint-cli2 "**/*.md"` (checks Markdown rules)
+3. `prettier --check "**/*.md"` (checks Markdown format)
+4. `pnpm typecheck` (runs the `tsc --noEmit` type check)
+5. `pnpm test` (runs `tests/*.test.ts` with the Node.js built-in test runner)
 
-如需自动格式化或修复代码：
+To format or fix code automatically, run:
 
 ```bash
 pnpm format
 pnpm lint:fix
 ```
 
-注意：`docs/research/**` 目录下的研究文档受版本证据约束，日常修改非研究文档时，请只对目标 Markdown 文件单独运行 `prettier --write` 与 `markdownlint-cli2`，不要改动 `docs/research/` 下的任何文件。
+Note: The research documents under `docs/research/**` are bound by version evidence. When you change non-research documents, run `prettier --write` and `markdownlint-cli2` only on the target Markdown files. Do not change any file under `docs/research/`.
 
-## 本地手动加载与调试
+## Local manual loading and debugging
 
-在仓库根目录下直接加载当前工作区扩展启动 Pi：
+Start Pi from the repository root and load the current workspace extension:
 
 ```bash
 pi --extension ./index.ts
 ```
 
-在离线模式下快速验证扩展入口能否正常初始化：
+To check quickly in offline mode that the extension entry point initializes, run:
 
 ```bash
 PI_OFFLINE=1 pi --no-extensions --extension ./index.ts --list-models __no_such_model__
 ```
 
-该命令应当正常加载 `index.ts` 且不抛出扩展初始化错误，最后仅提示未找到匹配的模型。
+This command should load `index.ts` without an extension initialization error. At the end, it only reports that no matching model was found.
 
-## 代码结构
+## Code structure
 
-| 路径                           | 职责说明                                                                                          |
-| ------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `index.ts`                     | 扩展入口：注册 Pi 生命周期钩子、`/memory` 命令、预取与维护调度器及运行时状态机。                  |
-| `src/config.ts`                | 默认配置（`DEFAULT_CONFIG`）、字段范围校验与 `~/.pi/agent/project-memory/config.json` 加载。      |
-| `src/models.ts`                | 角色模型解析、selector 原生结构化输出与工具模式降级、消息重放签名清理及后台子 Agent 循环。        |
-| `src/prompts.ts`               | 主 Agent、selector、extractor、dream 提示词组装，以及索引、取回消息和过期提醒渲染。               |
-| `src/store.ts`                 | `MEMORY.md` 裁剪与自动补建、topic 扫描与取回、写后 lint、读取基线、原子写入、跨进程锁与会话扫描。 |
-| `src/child-codemode.ts`        | 后台任务级 codemode 扩展封装、工具说明提示词生成与任务内独立内存 store。                          |
-| `src/child-tools.ts`           | 基于 Pi 原生工具工厂封装的后台六工具（`read`、`find`、`grep`、`write`、`edit`、`bash`）。         |
-| `src/native-search.ts`         | 启动独立子进程执行原生 `find` / `grep` 搜索，并限制输出大小与超时清理。                           |
-| `src/native-search-worker.mjs` | 子进程搜索入口：固定干净环境、禁用 ripgrep 外部配置与符号链接跟随，并注入排除目录规则。           |
-| `src/bash-readonly.ts`         | 基于 `tree-sitter-bash` 的只读 Shell 命令 AST 分析器与各命令选项白名单分类。                      |
-| `src/restricted-bash.ts`       | 后台 `bash` 策略：解析 `rm` 删除命令、校验读取路径意图、检查 `.git/config` 并构建受控 `PATH`。    |
-| `src/xargs-runner.mjs`         | 受控 `xargs` 执行器：解析标准输入参数并逐一校验真实路径、硬链接数与目录包含边界。                 |
-| `src/paths.ts`                 | 规范化项目根路径（含 Git worktree 归属）、项目 Key、防碰撞命名空间预留与安全路径工具函数。        |
-| `src/sanitize.ts`              | 换行符归一化、危险控制/格式/不可见字符清理，以及保留提示词标签（含同形异义字符）转义。            |
-| `src/types.ts`                 | 扩展内部共享的 TypeScript 接口与类型定义。                                                        |
+| Path                           | Responsibility                                                                                                                                                            |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `index.ts`                     | Extension entry point. Registers Pi lifecycle hooks, the `/memory` command, the prefetch and maintenance scheduler, and the runtime state machine.                        |
+| `src/config.ts`                | Default config (`DEFAULT_CONFIG`), field range validation, and loading of `~/.pi/agent/project-memory/config.json`.                                                       |
+| `src/models.ts`                | Role model resolution, selector native structured output with tool-mode fallback, message replay signature cleanup, and the background sub-agent loop.                    |
+| `src/prompts.ts`               | Assembly of the main agent, selector, extractor, and dream prompts. Also renders the index, recall messages, and staleness reminders.                                     |
+| `src/store.ts`                 | `MEMORY.md` trimming and automatic backfill, topic scanning and recall, post-write lint, read baselines, atomic writes, cross-process locks, and session scanning.        |
+| `src/child-codemode.ts`        | Wrapper for the task-level background codemode extension, generation of the tool description prompt, and an isolated in-memory store for each task.                       |
+| `src/child-tools.ts`           | The six background tools (`read`, `find`, `grep`, `write`, `edit`, `bash`) wrapped from Pi native tool factories.                                                         |
+| `src/native-search.ts`         | Runs native `find` and `grep` searches in a separate process. Limits output size and cleans up on timeout.                                                                |
+| `src/native-search-worker.mjs` | Entry point for the search process. Fixes a clean environment, disables external ripgrep config and symbolic link following, and injects exclusion rules for directories. |
+| `src/bash-readonly.ts`         | Read-only shell command AST analyzer based on `tree-sitter-bash`, with an option allowlist for each command.                                                              |
+| `src/restricted-bash.ts`       | Background `bash` policy. Parses `rm` delete commands, checks the intent of read paths, inspects `.git/config`, and builds the controlled `PATH`.                         |
+| `src/xargs-runner.mjs`         | Controlled `xargs` runner. Parses arguments from standard input and checks each real path, hard link count, and directory containment boundary.                           |
+| `src/paths.ts`                 | Canonical project root resolution (including Git worktree ownership), project key, collision-safe namespace reservation, and safe path helper functions.                  |
+| `src/sanitize.ts`              | Newline normalization, cleanup of dangerous control, format, and invisible characters, and escaping of reserved prompt tags (including homoglyph characters).             |
+| `src/types.ts`                 | TypeScript interfaces and type definitions shared inside the extension.                                                                                                   |
 
-## 自动化测试覆盖范围
+## Automated test coverage
 
-`tests/` 目录按模块划分单元测试与集成测试，全程使用本地临时目录与 Faux provider，不发送外部付费网络请求：
+The `tests/` directory organizes unit and integration tests by module. All tests use local temporary directories and a Faux provider. They do not send paid external network requests.
 
-- `tests/config.test.ts`：测试独立角色模型配置、默认值、非法数值回退、`config.example.json` 与 `DEFAULT_CONFIG` 的一致性，以及 `package.json` 的平台声明（`darwin`、`linux`）。
-- `tests/prompts.test.ts`：逐字比对 `mainMemoryPrompt`、`SELECTOR_SYSTEM_PROMPT`、`extractionPrompt`、`dreamPrompt` 与 `tests/fixtures/prompts/*.txt` 基线文件；验证取回消息头、过期提醒、预算计费内容以及 Unicode / 混淆标签净化。
-- `tests/models.test.ts`：测试 selector 输出解析、各 API 协议的原生 JSON Schema payload 转换、客户端格式错误的同模型 `select_memories` 工具降级、认证/限流/5xx/长度截断等不可重试错误的拦截、查询历史保持、同模型 `thinking` 保留与跨模型签名剥离、后台子 Agent 的 `ctx.cwd` 传递与 `maxTurns` 边界。
-- `tests/paths.test.ts`：测试 VCS 目录段识别、`autoMemoryDirectory` 合法性与回退、共享 `memory-roots` 锁与整理状态、命名空间符号链接拒绝、并发 `.project-root` 预留、项目 Key 冲突消歧以及 Git worktree 共用主检出身份。
-- `tests/store.test.ts`：测试路径简写归一化、`MEMORY.md` 200 行 / 25,000 UTF-16 代码单元裁剪与 80% 自动补建、低文件描述符限制下的 16 并发扫描、4,096 字节完整 UTF-8 行取回、兼容旧版扁平 frontmatter、硬链接安全的原子替换、读取基线 CAS 冲突检测、共享整理状态迁移与跨进程锁租约。
-- `tests/child-tools.test.ts`：验证后台六工具的 Pi 原生名称与 schema、继承父会话 `ctx.cwd`、显式分页读取建立基线而自动截断或图片读取撤销基线、拒绝 `.pdf` 与 `.ipynb`、`edit` 的多处修改与 `staleRecovered` 恢复、批准读取根与 session 目录排除，以及 `bash rm` 的基线与受保护子目录限制。
-- `tests/child-codemode.test.ts`：验证后台任务在 `on` 与 `only` 模式下封装 Pi 原生 `codemode`、仅暴露六个受限工具、隔离任务内 `store()` / `load()`、溢出输出文件重定位与清理，以及脚本执行中途代次失效或中止时的即时拦截。
-- `tests/bash-readonly.test.ts` 与 `tests/search-boundaries.test.ts`：验证 `tree-sitter-bash` 只读命令与参数分类、危险 Git 配置拦截、受控 `xargs` 路径验证、忽略宿主 `RIPGREP_CONFIG_PATH` 的 `--follow` 设置，以及 dream 对原始 session 目录的只读访问。
-- `tests/concurrency.test.ts`：通过多子进程 worker（`lock-worker.ts`、`cas-worker.ts`）验证跨进程锁互斥、死进程锁恢复、dream 时间戳 CAS 与文件并发编辑 CAS。
-- `tests/lifecycle.test.ts`：端到端验证 Pi 钩子生命周期，包括项目信任门控、`enabled: false` 延迟初始化、2 秒预取等待与延迟 `steer` 送达、普通与排队输入的空白门槛、图片归一化去重、完整读取抑制与分支恢复、满 48 小时过期提醒、写后 lint、主 Agent 直接写入去重、三词用户正文门槛、新输入触发 `trailingExtraction`、会话压缩前提取与状态重置、dream 尝试时间保留与异常回滚，以及进程内后台 usage 累计。
+- `tests/config.test.ts`: Tests separate role model settings, defaults, fallback for invalid numbers, consistency between `config.example.json` and `DEFAULT_CONFIG`, and the platform declaration in `package.json` (`darwin` and `linux`).
+- `tests/prompts.test.ts`: Compares `mainMemoryPrompt`, `SELECTOR_SYSTEM_PROMPT`, `extractionPrompt`, and `dreamPrompt` word for word with the `tests/fixtures/prompts/*.txt` baseline files. Checks the header of recall messages, staleness reminders, budget billing content, and sanitization of Unicode and disguised tags.
+- `tests/models.test.ts`: Tests selector output parsing, native JSON Schema payload conversion for each API protocol, same-model fallback to the `select_memories` tool after client format errors, blocking of non-retryable errors such as authentication, rate limit, 5xx, and length truncation, query history retention, same-model `thinking` retention and cross-model signature stripping, passing of `ctx.cwd` to background sub-agents, and `maxTurns` boundaries.
+- `tests/paths.test.ts`: Tests VCS directory segment detection, `autoMemoryDirectory` validity and fallback, shared `memory-roots` locks and consolidation state, rejection of namespace symbolic links, concurrent `.project-root` reservation, project key collision disambiguation, and sharing of one project identity across Git worktrees of the same checkout.
+- `tests/store.test.ts`: Tests path shorthand normalization, `MEMORY.md` trimming at 200 lines and 25,000 UTF-16 code units, automatic backfill at 80%, 16-way concurrent scanning under low file descriptor limits, recall of 4,096-byte complete UTF-8 lines, compatibility with legacy flat frontmatter, hard-link-safe atomic replacement, read baseline CAS conflict detection, migration of shared consolidation state, and cross-process lock leases.
+- `tests/child-tools.test.ts`: Verifies the Pi native names and schemas of the six background tools, inheritance of the parent session's `ctx.cwd`, explicit paged reads that establish a baseline while automatic truncation or image reads revoke it, rejection of `.pdf` and `.ipynb` files, `edit` with multiple changes and `staleRecovered` recovery, approved read roots and session directory exclusion, and the baseline and protected subdirectory limits for `bash rm`.
+- `tests/child-codemode.test.ts`: Verifies that background tasks wrap Pi native `codemode` in `on` and `only` modes, expose only the six restricted tools, isolate `store()` and `load()` within each task, relocate and clean up overflow output files, and immediately block calls when the generation becomes stale or the run is aborted during script execution.
+- `tests/bash-readonly.test.ts` and `tests/search-boundaries.test.ts`: Verify read-only command and argument classification for `tree-sitter-bash`, blocking of dangerous Git configuration, controlled `xargs` path validation, ignoring of the host `RIPGREP_CONFIG_PATH` with the `--follow` setting, and dream's read-only access to the original session directory.
+- `tests/concurrency.test.ts`: Uses multi-process workers (`lock-worker.ts` and `cas-worker.ts`) to verify cross-process lock mutual exclusion, recovery from locks held by dead processes, dream timestamp CAS, and file edit CAS under concurrency.
+- `tests/lifecycle.test.ts`: Verifies the Pi hook lifecycle from end to end. It covers the project trust gate, lazy initialization with `enabled: false`, the 2-second prefetch wait and delayed `steer` delivery, the whitespace threshold for normal and queued input, deduplication of image normalization, full-read suppression and branch recovery, staleness reminders at 48 hours, post-write lint, deduplication when the main agent writes directly, the three-word user prose threshold, `trailingExtraction` triggered by new input, extraction before session compaction and state reset, retention and exception rollback of the dream attempt time, and in-process accumulation of background usage.
 
-如果修改了 provider 请求参数构造或 Pi SDK 集成接口，除了运行 `pnpm check` 外，还应在配置了真实模型凭据的环境中做端到端手动验证。
+If you change the construction of provider request parameters or the Pi SDK integration interface, run `pnpm check`. Then run an end-to-end manual check in an environment with real model credentials.
 
-## 长期架构与维护约束
+## Long-term architecture and maintenance constraints
 
-以下规则是本项目的长期设计边界，修改代码或文档时必须遵守：
+The following rules are the long-term design boundaries of this project. Follow them when you change code or docs.
 
-1. **聚焦本地私有文件模式对齐**：项目优先对齐 Claude Code 2.1.296 的本地项目记忆文件格式、索引与取回窗口、selector、回合后提取、定期 dream 整理及生命周期。明确不实现 BM25，也不实现任何依赖服务端 memory API 的功能（包括账户记忆、团队或组织共享存储、`claude.ai` Project memory、服务端同步、embedding、ranking 和 `memory_search`）。切勿通过隐藏开关或可选依赖引入这些能力，也不要把局部相似夸大为完整产品兼容。
-2. **保持主会话工具原样，后台复用 Pi 原生工具工厂**：严禁注册或覆盖主会话的同名内置工具。后台子 Agent 固定使用 Pi 原生名称与 schema 的 `read`、`find`、`grep`、`write`、`edit` 和 `bash`（以及主会话开启 `codemode` 时的任务内原生 `codemode`，通过公开的 `createCodemodeExtension()` 接入，不深层导入 Pi 内部私有模块）。不要增加独立的 `Delete` 工具或不受限制的 Shell。
-3. **坚持应用层边界与并发正确性，不夸大为操作系统沙箱**：Pi 原生工具的 `cwd` 不是安全边界。后台工具外层必须保留项目信任、批准读取根目录、memory 目录小写 `.md` 写入包含、符号链接拒绝、普通文本读取基线、代次检查、跨进程锁与原子替换。受限 `bash` 必须保留 AST 分类、命令参数白名单、受信任可执行文件解析、受控 `xargs` 与独立子进程搜索排除规则（严禁通过临时篡改主进程 `process.env` 来限制搜索）。这些机制用于限定后台工具能力与保证并发安全，不得在文档中描述为抵抗同用户恶意进程的完整 OS 级沙箱。
-4. **严格保护静态提示词基线与 `docs/research/` 边界**：
-   - `docs/research/` 只记录 Claude Code 2.1.296 二进制的逆向结论、原始提示词、工具定义与证据，必须保留 `Claude Code` 原名与原文，不得混入 Pi 的实现或适配说明。
-   - 运行时四份核心提示词（主记忆、selector、extractor、dream）的静态文本必须与 `tests/fixtures/prompts/*.txt` 保持一致，只允许四类替换（`CLAUDE.md` 改为 `AGENTS.md`、Pi 工具与字段名替换、删除不支持功能的专属段落、`Claude Code` 改为 `the agent`）以及 selector 工具模式末尾的固定 `select_memories` 调用指令。后台工具列表与 codemode 说明通过独立的 `backgroundToolPrompt()` 追加在系统提示词末尾，不得通过篡改 Claude 派生提示词基线来容纳宿主适配。
-5. **保持配置、依赖与测试同步**：
-   - `config.example.json` 解析后的配置值必须与 `src/config.ts` 中的 `DEFAULT_CONFIG` 保持一致。
-   - `enabled: false` 必须在解析项目路径和创建目录之前生效。
-   - 依赖版本使用 `^`（caret range），`peerDependencies` 保持 `*`。需要执行安装构建脚本的依赖必须在 `pnpm-workspace.yaml` 的 `allowBuilds` 中按包名显式列出，不得全局放开。
-   - 任何运行时行为变更都必须在同一提交中同步更新自动化测试与面向用户或维护者的文档。
+1. **Focus on alignment with the local private file mode**: The project aligns first with the local project memory file format, index and recall windows, selector, post-turn extraction, periodic dream consolidation, and lifecycle of Claude Code 2.1.296. BM25 is not implemented. Neither are features that depend on a server-side memory API. These include account memory, team or organization shared storage, `claude.ai` Project memory, server-side sync, embedding, ranking, and `memory_search`. Do not add these features through hidden switches or optional dependencies. Also, do not overstate partial similarity as full product compatibility.
 
-## 发布前检查
+2. **Keep the main session tools unchanged, and reuse Pi native tool factories in the background**: Do not register or override built-in tools with the same name in the main session. Background sub-agents always use `read`, `find`, `grep`, `write`, `edit`, and `bash` with Pi native names and schemas. When the main session enables `codemode`, they also use the task-level native `codemode`. That tool connects through the public `createCodemodeExtension()` and does not deep-import private Pi internal modules. Do not add a separate `Delete` tool or an unrestricted shell.
 
-本项目在 GitHub 上的仓库为 `XYenon/pi-project-memory`，在 npm 上的包名为 `pi-project-memory`。在手动执行发布前，请确认工作区干净并运行：
+3. **Keep application-level boundaries and concurrency correctness, and do not overstate them as an operating system sandbox**: The `cwd` of Pi native tools is not a security boundary. The outer layer of the background tools must keep project trust, approved read roots, containment checks that limit writes to lowercase `.md` files in the memory directory, symbolic link rejection, the plain-text read baseline, generation checks, cross-process locks, and atomic replacement. The restricted `bash` must keep AST classification, the command argument allowlist, trusted executable resolution, controlled `xargs`, and exclusion rules for the separate search subprocess. Do not limit search by temporarily changing `process.env` in the main process. These mechanisms limit what background tools can do and keep concurrent access safe. Do not describe them in the docs as a full OS-level sandbox that resists malicious processes running as the same user.
+
+4. **Strictly protect the static prompt baseline and the `docs/research/` boundary**:
+   - `docs/research/` records only the reverse engineering conclusions, original prompts, tool definitions, and evidence for the Claude Code 2.1.296 binary. It must keep the original name `Claude Code` and the original text. It must not mix in Pi implementation or adaptation notes.
+   - The static text of the four core runtime prompts (main memory, selector, extractor, and dream) must match `tests/fixtures/prompts/*.txt`. Only four kinds of replacement are allowed. `CLAUDE.md` becomes `AGENTS.md`, Pi tool and field names replace the originals, sections that only serve unsupported features are removed, and `Claude Code` becomes `the agent`. The selector tool mode also adds the fixed `select_memories` call instruction at the end. The background tool list and codemode notes are appended to the end of the system prompt through a separate `backgroundToolPrompt()`. Do not change the prompt baseline derived from Claude to fit host adaptations.
+
+5. **Keep config, dependencies, and tests in sync**:
+   - The parsed values of `config.example.json` must match `DEFAULT_CONFIG` in `src/config.ts`.
+   - `enabled: false` must take effect before project paths are resolved and directories are created.
+   - Dependency versions use `^` (caret range), and `peerDependencies` stays `*`. Dependencies that run install build scripts must be listed by package name in `allowBuilds` in `pnpm-workspace.yaml`. Do not allow them globally.
+   - Any runtime behavior change must update the automated tests and the user-facing or maintainer-facing docs in the same commit.
+
+## Pre-release checks
+
+The GitHub repository for this project is `XYenon/pi-project-memory`. The npm package name is `pi-project-memory`. Before you publish manually, confirm that the working tree is clean and run:
 
 ```bash
 pnpm check
 pnpm pack --dry-run
 ```
 
-核对 `pnpm pack --dry-run` 输出的文件列表（应包含 `index.ts`、`src/`、`docs/`、`config.example.json`、`LICENSE` 和 `package.json`）、版本号与许可证信息无误后再执行发布。
+Check the file list from `pnpm pack --dry-run`. It should include `index.ts`, `src/`, `docs/`, `config.example.json`, `LICENSE`, and `package.json`. Confirm that the version number and license information are correct before you publish.
