@@ -471,11 +471,8 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 				const prepared = await prepareRestrictedBash(params.command, {
 					memoryDir: env.memoryDir,
 					cwd: env.cwd,
-					scratchDir: env.scratchDir,
 					resolveReadablePath: (path) => resolveReadablePath(env, path),
-					canonicalReadRoots: () => canonicalReadRoots(env),
 					assertDirectoryRead: (path) => assertDirectoryRead(env, path),
-					excludedReadRoots: env.excludedReadRoots,
 				});
 				if (prepared.kind === "delete") {
 					for (const path of prepared.paths) {

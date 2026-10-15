@@ -92,6 +92,8 @@ Selector 默认最大输出为 512 token，单次最多返回 5 个文件名（�
 
 后台子 Agent 不仿造 Claude Code 的文件工具名称与参数结构，而是直接包装并复用 Pi 原生的六个工具工厂：`read`、`find`、`grep`、`write`、`edit` 和 `bash`。因此，`read` 的分页窗口、`find` / `grep` 的参数格式以及 `edit` 的 `edits[]` 数组结构均以 Pi 为准；不提供 Claude 的 `Glob` 工具、`Grep` 的 `output_mode`、`Read` 的 PDF `pages` / `allow_large` 参数，也不支持读取 PDF 或 Jupyter Notebook。
 
+Bash 按 Claude 记忆权限路径中观察到的执行顺序工作：先进行静态权限和只读检查，再交给宿主通用 Shell 工具。Pi Project Memory 将原始命令传给 Pi 原生 Bash 工具，由宿主程序执行 grep 和 xargs；不复刻 Claude 可选的沙箱包装。标准输入展开后的动态路径不做运行时检查。
+
 为了消除父会话系统提示词中工具列表与后台任务工具列表的差异，后台请求会在系统提示词末尾追加一段独立的 `## Background memory task tools` 说明，列出当前任务实际声明的工具及其访问限制，同时完整保留父提示词中的用户指令、项目指令与自动记忆规则。
 
 当主会话启用了 `codemode` 时，extractor 和 dream 也会在任务内部启用 Pi 原生 `codemode`，并继承主会话的 `on` / `only` 模式与 `inlineBudget`。脚本内只能调用当前任务的六个受限工具，同样受路径、读取基线、项目信任与代次检查约束，且任务内的内存 store 与父会话完全隔离。这是面向 Pi 执行环境的工具调用适配，不改变上述四份固定提示词基线。

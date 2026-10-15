@@ -38,7 +38,7 @@ if (process.argv[2] === "--executable") {
 	const separator = args.indexOf("--");
 	if (separator < 0) throw new Error("Unexpected native search arguments");
 	const effectiveArgs = [...args.slice(0, separator), ...boundaryArgs, ...args.slice(separator)];
-	const result = spawnSync(request.executable, effectiveArgs, {
+	const result = spawnSync(request.name === "grep" ? "rg" : "fd", effectiveArgs, {
 		cwd: statSync(searchPath).isDirectory() ? searchPath : dirname(searchPath),
 		stdio: "inherit",
 		env: { ...process.env, RIPGREP_CONFIG_PATH: "" },

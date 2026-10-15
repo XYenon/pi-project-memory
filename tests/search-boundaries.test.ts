@@ -77,7 +77,7 @@ test("dream tools read original session directories and keep them read-only", as
 	assert.equal(await readFile(transcript, "utf8"), "SESSION_MARKER\n");
 });
 
-test("fresh controlled Bash resolves xargs targets and env wrappers without earlier calls", async (t) => {
+test("native Bash runs xargs and env commands without earlier calls", async (t) => {
 	const env = await workspace(t);
 	await writeFile(join(env.projectRoot, "inside.md"), "project value\n");
 	await writeFile(join(env.projectRoot, "-danger.md"), "dash filename value\n");
@@ -85,7 +85,7 @@ test("fresh controlled Bash resolves xargs targets and env wrappers without earl
 		"printf 'inside.md\\n' | xargs head -n 1",
 		"printf 'value\\n' | xargs echo",
 		"env head -n 1 inside.md",
-		"printf '%s\\n' '-danger.md' | xargs head -n 1",
+		"printf '%s\\n' '-danger.md' | xargs head -n 1 --",
 	].entries()) {
 		const scratchDir = join(env.root, `fresh-${index}`);
 		await mkdir(scratchDir);
@@ -95,6 +95,22 @@ test("fresh controlled Bash resolves xargs targets and env wrappers without earl
 		assert.match(resultText(result), /value/);
 		assert.doesNotMatch(resultText(result), /ENOENT|Command exited/);
 	}
+});
+
+test("Bash leaves grep options and xargs input expansion to the native programs", async (t) => {
+	const env = await workspace(t);
+	await mkdir(join(env.projectRoot, ".git"));
+	await writeFile(join(env.projectRoot, ".git", "config"), "NATIVE_GREP_MARKER\n");
+	await writeFile(join(env.root, "outside.md"), "NATIVE_XARGS_MARKER\n");
+	const bash = createChildTools({ ...env, mode: "extractor" }).find((tool) => tool.name === "bash")!;
+	const grep = await bash.execute("grep", { command: "grep -r NATIVE_GREP_MARKER ." });
+	assert.notEqual(grep.isError, true, resultText(grep));
+	assert.match(resultText(grep), /NATIVE_GREP_MARKER/);
+	const xargs = await bash.execute("xargs", { command: "printf '../outside.md\\n' | xargs head -n 1" });
+	assert.notEqual(xargs.isError, true, resultText(xargs));
+	assert.match(resultText(xargs), /NATIVE_XARGS_MARKER/);
+	const explicit = await bash.execute("explicit", { command: "head -n 1 ../outside.md" });
+	assert.equal(explicit.isError, true);
 });
 
 test("explicit pages establish Claude-style baselines but automatic truncation revokes them", async (t) => {

@@ -270,7 +270,6 @@ After the extension is enabled in a trusted project, it uses the following file 
 
 <os.tmpdir()>/                               # Operating system temporary directory (created as needed during runs and deleted automatically afterward)
 ├── pi-project-memory-<random>/              # Private scratchDir for one extractor or dream run
-│   ├── controlled-bin/                      # Trusted command symlinks and grep/xargs wrapper scripts that restricted Bash puts on PATH
 │   ├── bash-<uuid>.log                      # Full output file that restricted Bash saves when output exceeds the inline length
 │   └── codemode-<uuid>.txt                  # Full output file that background codemode saves when output exceeds the inline length
 └── pi-project-memory-search-<random>/       # Temporary isolation directory for one background find or grep subprocess run
@@ -335,7 +334,7 @@ The extension **does not store** conversation transcripts. Instead, it uses `ctx
 - **Use in Dream**:
   1. Scheduling: The Dream scheduler reads the `.jsonl` files under `sessionDir` as read-only. For each file, it reads the first JSON header line within the first 16 KiB. The header must have `type === "session"`, and its `id` must match the safe character syntax `/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/`. The scheduler excludes the current session and counts the other sessions with `mtimeMs > lastDreamAt`. If the host uses a shared custom session directory (`usesDefaultSessionDir()` returns `false`), the scheduler also parses the `cwd` field in the header and counts only the sessions that belong to the current project's `projectRoot`.
   2. Execution: `sessionDir` is added to the approved read-only roots of the dream sub-agent. The list of selected recent session IDs is written into the dream prompt. The dream sub-agent can use `read`, `find`, `grep`, or restricted read-only `bash` to search the historical context by keyword in the original `sessionDir`. The tool layer rejects any write or delete operation aimed at `sessionDir`.
-- **Exclusion rule in the extractor**: The extractor's input comes directly from the in-memory session message projection (`buildSessionProjection()`). It does not need to read historical session files from disk, and it is not allowed to. So `sessionDir` is explicitly added to the extractor's `excludedReadRoots`. Even when `sessionDir` is inside the project directory, all of the extractor's tools and controlled `xargs` block reads from it.
+- **Exclusion rule in the extractor**: The extractor's input comes directly from the in-memory session message projection (`buildSessionProjection()`). It does not need to read historical session files from disk, and it is not allowed to. So `sessionDir` is explicitly added to the extractor's `excludedReadRoots`. Even when `sessionDir` is inside the project directory, the extractor's file tools and explicit Bash path checks block reads from it. Bash uses native command execution, so paths produced by `xargs` at runtime are not checked.
 
 ### 6. File lifecycle, cleanup, and user-editable scope
 

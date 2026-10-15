@@ -270,7 +270,6 @@
 
 <os.tmpdir()>/                               # 操作系统临时目录（运行期间按需创建，结束后自动删除）
 ├── pi-project-memory-<random>/              # 单次 extractor 或 dream 运行的私有 scratchDir
-│   ├── controlled-bin/                      # 受限 Bash 注入 PATH 的受信任命令软链与 grep/xargs 包装脚本
 │   ├── bash-<uuid>.log                      # 受限 Bash 超出内联长度时的完整输出转存文件
 │   └── codemode-<uuid>.txt                  # 后台 codemode 超出内联长度时的完整输出转存文件
 └── pi-project-memory-search-<random>/       # 单次后台 find / grep 子进程运行的临时隔离目录
@@ -335,7 +334,7 @@
 - **在 Dream 中的用途**：
   1. 调度阶段：Dream 调度器只读遍历 `sessionDir` 下的 `.jsonl` 文件，读取每个文件前 16 KiB 的首行 JSON header（要求 `type === "session"` 且 `id` 符合安全字符语法 `/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/`），排除当前会话自身，统计 `mtimeMs > lastDreamAt` 的其他会话数量。如果宿主使用的是共享自定义 session 目录（`usesDefaultSessionDir()` 返回 `false`），调度器还会额外解析 header 中的 `cwd` 字段，只统计归属于当前项目 `projectRoot` 的会话。
   2. 执行阶段：`sessionDir` 被加入 dream 子 Agent 的批准只读根目录，选出的近期 session ID 列表被写入 dream 提示词。Dream 子 Agent 可以使用 `read`、`find`、`grep` 或受限只读 `bash` 在原始 `sessionDir` 中按关键词检索历史上下文；任何针对 `sessionDir` 的写入或删除操作都会被工具层拒绝。
-- **在 Extractor 中的排除规则**：Extractor 的输入直接来自当前内存中的会话消息投影（`buildSessionProjection()`），不需要也不允许读取磁盘上的历史会话文件。因此 `sessionDir` 被显式加入 extractor 的 `excludedReadRoots`（即使 `sessionDir` 位于项目目录内部，extractor 的所有工具和受控 `xargs` 也会阻止读取它）。
+- **在 Extractor 中的排除规则**：Extractor 的输入直接来自当前内存中的会话消息投影（`buildSessionProjection()`），不需要也不允许读取磁盘上的历史会话文件。因此 `sessionDir` 被显式加入 extractor 的 `excludedReadRoots`（即使 `sessionDir` 位于项目目录内部，extractor 的文件工具和 Bash 显式路径检查也会阻止读取它；Bash 使用原生命令执行，因此不会检查 `xargs` 在运行时生成的路径）。
 
 ### 6. 文件生命周期、清理机制与用户可编辑范围
 

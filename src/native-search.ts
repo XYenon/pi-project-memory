@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { resolveTrustedCommand } from "./restricted-bash.ts";
 
 /** Run Pi's native search factory without changing the host's environment. */
 export async function runNativeSearch(
@@ -14,9 +13,6 @@ export async function runNativeSearch(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<unknown>> {
 	if (signal?.aborted) throw new Error("Search was aborted");
-	const command = name === "grep" ? "rg" : "fd";
-	const executable = resolveTrustedCommand(command, policy.cwd);
-	if (!executable) throw new Error(`No trusted ${command} executable is available`);
 	const directory = await mkdtemp(join(tmpdir(), "pi-project-memory-search-"));
 	const worker = fileURLToPath(new URL("./native-search-worker.mjs", import.meta.url));
 	try {
@@ -69,7 +65,7 @@ export async function runNativeSearch(
 				}
 			});
 			child.stdin.on("error", () => {});
-			child.stdin.end(JSON.stringify({ name, params, policy, executable, directory }));
+			child.stdin.end(JSON.stringify({ name, params, policy, directory }));
 			if (signal?.aborted) stop();
 		});
 	} finally {

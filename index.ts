@@ -380,7 +380,10 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 		if (!prefetch) return updateMessage(drainMemoryUpdates(state));
 		if (!prefetch.result) {
 			const remaining = Math.max(0, prefetch.startedAt + RECALL_PREFETCH_DEADLINE_MS - Date.now());
-			await Promise.race([prefetch.promise.catch(() => undefined), delay(remaining)]);
+			await waitWithTimeout(
+				prefetch.promise.catch(() => undefined),
+				remaining,
+			);
 		}
 		if (prefetch.result) {
 			const message = await consumeRecallPrefetch(state, prefetch, ctx);
@@ -598,11 +601,17 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 			);
 		})();
 		// Claude Code's extraction drainer waits up to 60 seconds before teardown.
-		const completed = await Promise.race([drain.then(() => true), delay(60_000).then(() => false)]);
+		const completed = await waitWithTimeout(
+			drain.then(() => true),
+			60_000,
+		);
 		if (!completed) {
 			state.shutdownTimedOut = true;
 			invalidatePasses(state);
-			await Promise.race([drain.catch(() => {}), delay(1_000)]);
+			await waitWithTimeout(
+				drain.catch(() => {}),
+				1_000,
+			);
 		}
 		runtime = undefined;
 	});
@@ -1394,9 +1403,16 @@ function formatModel(model: string, ctx: ExtensionContext): string {
 	return `inherit (${ctx.model.provider}/${ctx.model.id})`;
 }
 
-function delay(ms: number): Promise<null> {
-	return new Promise((resolve) => {
-		const timer = setTimeout(() => resolve(null), ms);
-		timer.unref();
-	});
+async function waitWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<null>((resolve) => {
+				timer = setTimeout(() => resolve(null), ms);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
 }

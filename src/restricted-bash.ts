@@ -1,21 +1,15 @@
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
-import { chmod, lstat, mkdir, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { delimiter, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
-import { type BashToolOptions, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { join, relative, resolve, sep } from "node:path";
+import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
 import fg from "fast-glob";
 import { classifyReadOnlyBash } from "./bash-readonly.ts";
-import { assertContainedMarkdown, canonicalizeReadRoots, isContainedPath, VCS_METADATA_DIRECTORIES } from "./paths.ts";
+import { assertContainedMarkdown, VCS_METADATA_DIRECTORIES } from "./paths.ts";
 
 export interface RestrictedBashPolicy {
 	memoryDir: string;
 	cwd: string;
-	scratchDir?: string;
 	resolveReadablePath(path: string): Promise<string>;
-	canonicalReadRoots(): Promise<string[]>;
 	assertDirectoryRead?(path: string): Promise<void>;
-	excludedReadRoots?: string[];
 }
 
 export type PreparedBash =
@@ -48,21 +42,6 @@ const PROTECTED_MEMORY_DIRECTORIES = new Set([
 	"objects",
 	"refs",
 	"skills",
-]);
-
-const SHELL_BUILTINS = new Set([
-	"alias",
-	"builtin",
-	"cd",
-	"command",
-	"echo",
-	"false",
-	"help",
-	"history",
-	"printf",
-	"pwd",
-	"true",
-	"type",
 ]);
 
 function shellWords(value: string): string[] {
@@ -211,150 +190,6 @@ function followsSymlinks(name: string, argv: string[]): boolean {
 	return name === "ls" && args.some((arg) => /^-[A-Za-z]*R[A-Za-z]*$/.test(arg) && /L/.test(arg));
 }
 
-export function resolveTrustedCommand(name: string, cwd: string): string | undefined {
-	const home = homedir();
-	const userRoots = [
-		join(getAgentDir(), "bin"),
-		join(home, ".local", "bin"),
-		join(home, ".local", "share", "cargo", "bin"),
-		join(home, ".local", "share", "go", "bin"),
-		join(home, ".local", "lib", "kache", "shims"),
-		join(home, ".nix-profile", "bin"),
-		...(process.env.USER ? [`/etc/profiles/per-user/${process.env.USER}/bin`] : []),
-	];
-	const trustedTarget = (path: string, source: string) =>
-		["/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/"].some((prefix) => path.startsWith(prefix)) ||
-		path.startsWith("/nix/store/") ||
-		path.startsWith("/opt/homebrew/Cellar/") ||
-		path.startsWith("/usr/local/Cellar/") ||
-		path.startsWith("/Applications/Docker.app/") ||
-		path.startsWith("/Applications/OrbStack.app/") ||
-		userRoots.includes(source);
-	for (const directory of [
-		...(process.env.PATH ?? "").split(delimiter),
-		...userRoots,
-		"/usr/bin",
-		"/bin",
-		"/usr/sbin",
-		"/sbin",
-	]) {
-		if (!directory?.startsWith("/")) continue;
-		try {
-			const canonical = realpathSync(join(directory, name));
-			const info = statSync(canonical);
-			accessSync(canonical, constants.X_OK);
-			if (
-				info.isFile() &&
-				(info.mode & 0o022) === 0 &&
-				trustedTarget(canonical, directory) &&
-				!isContainedPath(cwd, canonical)
-			)
-				return canonical;
-		} catch {}
-	}
-	return undefined;
-}
-
-function quote(value: string): string {
-	return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-async function installControlledCommands(
-	policy: RestrictedBashPolicy,
-	cwd: string,
-	commandNames: readonly string[],
-	controlledXargs: boolean,
-): Promise<string> {
-	if (!policy.scratchDir) throw new Error("Restricted Bash requires a private scratch directory");
-	const directory = join(policy.scratchDir, "controlled-bin");
-	await mkdir(directory, { recursive: true, mode: 0o700 });
-	for (const name of commandNames) {
-		if (name === "xargs") continue;
-		const executable = resolveTrustedCommand(name, cwd);
-		if (!executable) {
-			if (SHELL_BUILTINS.has(name)) continue;
-			throw new Error(`No trusted ${name} executable is available`);
-		}
-		const target = join(directory, name);
-		if (["grep", "egrep", "fgrep"].includes(name)) {
-			const exclusions = VCS_METADATA_DIRECTORIES.map((entry) => `--exclude-dir=${quote(entry)}`).join(" ");
-			await writeFile(target, `#!/bin/sh\nexec ${quote(executable)} ${exclusions} "$@"\n`, { mode: 0o700 });
-			await chmod(target, 0o700);
-		} else {
-			await symlink(executable, target).catch((error) => {
-				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			});
-		}
-	}
-	if (controlledXargs) {
-		const wrapper = join(directory, "xargs");
-		const runner = fileURLToPath(new URL("./xargs-runner.mjs", import.meta.url));
-		await writeFile(wrapper, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(runner)} "$@"\n`, { mode: 0o700 });
-		await chmod(wrapper, 0o700);
-	}
-	return directory;
-}
-
-function safeEnvironment(cwd: string, controlledBin: string, roots: string[]): NodeJS.ProcessEnv {
-	const blocked = new Set([
-		"BASH_ENV",
-		"BASHOPTS",
-		"CDPATH",
-		"DOCKER_CONFIG",
-		"DOCKER_CONTEXT",
-		"DOCKER_HOST",
-		"ENV",
-		"GLOBIGNORE",
-		"LESSCLOSE",
-		"LESSOPEN",
-		"NODE_OPTIONS",
-		"PROMPT_COMMAND",
-		"SHELLOPTS",
-	]);
-	const unsafe =
-		/^(?:LD_|DYLD_|PYTHON|PERL5|RUBY|GEM_|BUNDLE_|NODE_|JAVA_TOOL_OPTIONS$|_JAVA_OPTIONS$|CLASSPATH$|GCONV_PATH$|NLSPATH$|LOCPATH$|XDG_)/;
-	const env = Object.fromEntries(
-		Object.entries(process.env).filter(
-			([key]) =>
-				!blocked.has(key) &&
-				!key.startsWith("BASH_FUNC_") &&
-				!key.startsWith("DOCKER_") &&
-				!key.startsWith("GIT_") &&
-				!unsafe.test(key),
-		),
-	);
-	const falseCommand = resolveTrustedCommand("false", cwd);
-	return {
-		...env,
-		DIFF_OPTIONS: "",
-		DOCKER_CONFIG: "/dev/null",
-		GIT_ATTR_NOSYSTEM: "1",
-		GIT_CONFIG_GLOBAL: "/dev/null",
-		GIT_CONFIG_NOSYSTEM: "1",
-		GIT_EXTERNAL_DIFF: "",
-		GIT_OPTIONAL_LOCKS: "0",
-		GIT_PAGER: "cat",
-		GREP_OPTIONS: "",
-		HOME: cwd,
-		MANPAGER: "cat",
-		PAGER: "cat",
-		PATH: controlledBin,
-		PI_MEMORY_XARGS_ROOTS: JSON.stringify(roots),
-		RIPGREP_CONFIG_PATH: "",
-		...(falseCommand
-			? {
-					GIT_CONFIG_COUNT: "3",
-					GIT_CONFIG_KEY_0: "core.hooksPath",
-					GIT_CONFIG_VALUE_0: "/dev/null",
-					GIT_CONFIG_KEY_1: "diff.external",
-					GIT_CONFIG_VALUE_1: "",
-					GIT_CONFIG_KEY_2: "gpg.program",
-					GIT_CONFIG_VALUE_2: falseCommand,
-				}
-			: {}),
-	};
-}
-
 export async function prepareRestrictedBash(command: string, policy: RestrictedBashPolicy): Promise<PreparedBash> {
 	if (command.includes("\0")) throw new Error("command contains a NUL byte");
 	const deletePaths = parseDelete(command, policy.memoryDir);
@@ -362,7 +197,6 @@ export async function prepareRestrictedBash(command: string, policy: RestrictedB
 
 	const decision = classifyReadOnlyBash(command, { platform: process.platform });
 	if (!decision.readOnly) throw new Error(decision.reason);
-	const usesXargs = decision.commands.some((item) => item.name === "xargs");
 	const cwd = await realpath(policy.cwd);
 	const revalidate = async () => {
 		let effectiveCwd = cwd;
@@ -392,28 +226,11 @@ export async function prepareRestrictedBash(command: string, policy: RestrictedB
 		}
 	};
 	await revalidate();
-	const commandNames = [...new Set(decision.commands.flatMap((item) => item.executableNames ?? [item.name]))];
-	const controlledBin = await installControlledCommands(policy, cwd, commandNames, usesXargs);
-	const roots = usesXargs ? await policy.canonicalReadRoots() : [];
-	const excludedRoots = await canonicalizeReadRoots(policy.excludedReadRoots ?? []);
-	const shellPath = resolveTrustedCommand("bash", cwd);
-	if (!shellPath) throw new Error("No trusted bash executable is available");
 	return {
 		kind: "execute",
 		cwd,
 		command,
 		revalidate,
-		options: {
-			shellPath,
-			exposeSessionEnvironment: false,
-			spawnHook: (context) => ({
-				command: context.command,
-				cwd,
-				env: {
-					...safeEnvironment(cwd, controlledBin, roots),
-					PI_MEMORY_XARGS_EXCLUDED_ROOTS: JSON.stringify(excludedRoots),
-				},
-			}),
-		},
+		options: { exposeSessionEnvironment: false },
 	};
 }

@@ -17,7 +17,6 @@ export interface BashCommandInfo {
 	pathIntents: BashPathIntent[];
 	/** Ordered temporary cwd transitions selected by wrappers such as env -C. */
 	workingDirectoryIntents?: BashPathIntent[];
-	executableNames?: string[];
 	hasGlob: boolean;
 }
 
@@ -1471,7 +1470,7 @@ function validValue(kind: ValueKind, value: string): boolean {
 		case "char":
 			return [...value].length === 1;
 		case "braces":
-			return value === "{}";
+			return value.length > 0;
 		case "eof":
 			return value === "EOF";
 		case "string":
@@ -1479,7 +1478,11 @@ function validValue(kind: ValueKind, value: string): boolean {
 	}
 }
 
-function parseOptions(args: string[], spec: OptionSpec, options?: { gitCounts?: boolean }): ParsedOptions | null {
+function parseOptions(
+	args: string[],
+	spec: OptionSpec,
+	options?: { gitCounts?: boolean; stopAtPositional?: boolean },
+): ParsedOptions | null {
 	const positionals: string[] = [];
 	const occurrences = new Map<string, string[]>();
 	let parsing = true;
@@ -1492,6 +1495,7 @@ function parseOptions(args: string[], spec: OptionSpec, options?: { gitCounts?: 
 		}
 		if (!parsing || arg === "-" || !arg.startsWith("-")) {
 			positionals.push(arg);
+			if (options?.stopAtPositional) parsing = false;
 			continue;
 		}
 		if (options?.gitCounts && /^-\d+$/.test(arg)) {
@@ -1587,15 +1591,12 @@ function splitEnvString(value: string): string[] | null {
 function stripWrappers(argv: string[]): {
 	argv: string[];
 	workingDirectoryIntents: BashPathIntent[];
-	wrapperNames: string[];
 } | null {
 	let current = [...argv];
 	const workingDirectoryIntents: BashPathIntent[] = [];
-	const wrapperNames: string[] = [];
 	for (;;) {
 		const name = current[0];
-		if (!name || !WRAPPERS.has(name)) return { argv: current, workingDirectoryIntents, wrapperNames };
-		wrapperNames.push(name);
+		if (!name || !WRAPPERS.has(name)) return { argv: current, workingDirectoryIntents };
 		current = current.slice(1);
 		if (name === "command") while (current[0] === "-p") current.shift();
 		else if (name === "timeout") {
@@ -1904,7 +1905,6 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 		env: command.env,
 		pathIntents: intents,
 		hasGlob: false,
-		executableNames: [...new Set([name, ...wrapper.wrapperNames])],
 	};
 	if (wrapper.workingDirectoryIntents.length > 0) info.workingDirectoryIntents = wrapper.workingDirectoryIntents;
 	if (command.hasGlob && !GLOB_SAFE_COMMANDS.has(name)) return null;
@@ -2310,20 +2310,32 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 	}
 	if (name === "xargs") {
 		if (platform === "win32") return null;
-		const parsed = parseOptions(args, XARGS_OPTIONS);
+		const parsed = parseOptions(args, XARGS_OPTIONS, { stopAtPositional: true });
+		if (parsed?.positionals.length === 0) return info;
 		const target = parsed?.positionals[0];
-		if (!target || !new Set(["echo", "printf", "wc", "grep", "egrep", "fgrep", "head", "tail"]).has(target))
-			return null;
-		if (target === "printf" && !safePrintf(parsed.positionals.slice(1), true)) return null;
-		if (parsed.occurrences.has("-I") && !new Set(["echo", "printf"]).has(target)) return null;
-		// The execution layer replaces xargs with a controlled runner. It validates
-		// each concrete path operand after stdin has been expanded.
+		if (!target) return null;
+		const replacement = optionValues(parsed, ["-I", "--replace"])[0];
+		if (replacement && target.includes(replacement)) return null;
+		// Validate the nested command and fixed operands before execution. Native
+		// xargs expands stdin later; there is no runtime path rewriting or runner.
 		const nested = classifyCommand({ argv: parsed.positionals, env: {}, redirects: [], hasGlob: false }, platform);
 		if (!nested) return null;
-		// Static nested-command file operands can be validated before execution.
-		// The controlled runner separately validates stdin-expanded operands.
-		intents.push(...nested.pathIntents);
-		return { ...info, executableNames: [...new Set([...(info.executableNames ?? []), target])] };
+		if (nested.name === "printf") {
+			const args = nested.argv.slice(1);
+			const format = args[args[0] === "--" ? 1 : 0];
+			if (!safePrintf(args, true) || (replacement && format?.includes(replacement))) return null;
+		}
+		// Unknown input must not introduce options that execute programs or write.
+		if (
+			["rg", "sort", "file", "jq", "awk", "sed", "find", "fd", "git", "gh", "docker", "date", "xargs"].includes(
+				nested.name,
+			) &&
+			!nested.argv.includes("--")
+		)
+			return null;
+		intents.push(...nested.pathIntents.filter((intent) => !replacement || !intent.value.includes(replacement)));
+		if (nested.workingDirectoryIntents?.length) info.workingDirectoryIntents = nested.workingDirectoryIntents;
+		return info;
 	}
 	if (DIRECT_COMMANDS.has(name)) {
 		const nonPath = new Set([

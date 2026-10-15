@@ -71,7 +71,6 @@ PI_OFFLINE=1 pi --no-extensions --extension ./index.ts --list-models __no_such_m
 | `src/native-search-worker.mjs` | 子进程搜索入口：固定干净环境、禁用 ripgrep 外部配置与符号链接跟随，并注入排除目录规则。           |
 | `src/bash-readonly.ts`         | 基于 `tree-sitter-bash` 的只读 Shell 命令 AST 分析器与各命令选项白名单分类。                      |
 | `src/restricted-bash.ts`       | 后台 `bash` 策略：解析 `rm` 删除命令、校验读取路径意图、检查 `.git/config` 并构建受控 `PATH`。    |
-| `src/xargs-runner.mjs`         | 受控 `xargs` 执行器：解析标准输入参数并逐一校验真实路径、硬链接数与目录包含边界。                 |
 | `src/paths.ts`                 | 规范化项目根路径（含 Git worktree 归属）、项目 Key、防碰撞命名空间预留与安全路径工具函数。        |
 | `src/sanitize.ts`              | 换行符归一化、危险控制/格式/不可见字符清理，以及保留提示词标签（含同形异义字符）转义。            |
 | `src/types.ts`                 | 扩展内部共享的 TypeScript 接口与类型定义。                                                        |
@@ -87,7 +86,7 @@ PI_OFFLINE=1 pi --no-extensions --extension ./index.ts --list-models __no_such_m
 - `tests/store.test.ts`：测试路径简写归一化、`MEMORY.md` 200 行 / 25,000 UTF-16 代码单元裁剪与 80% 自动补建、低文件描述符限制下的 16 并发扫描、4,096 字节完整 UTF-8 行取回、兼容旧版扁平 frontmatter、硬链接安全的原子替换、读取基线 CAS 冲突检测、共享整理状态迁移与跨进程锁租约。
 - `tests/child-tools.test.ts`：验证后台六工具的 Pi 原生名称与 schema、继承父会话 `ctx.cwd`、显式分页读取建立基线而自动截断或图片读取撤销基线、拒绝 `.pdf` 与 `.ipynb`、`edit` 的多处修改与 `staleRecovered` 恢复、批准读取根与 session 目录排除，以及 `bash rm` 的基线与受保护子目录限制。
 - `tests/child-codemode.test.ts`：验证后台任务在 `on` 与 `only` 模式下封装 Pi 原生 `codemode`、仅暴露六个受限工具、隔离任务内 `store()` / `load()`、溢出输出文件重定位与清理，以及脚本执行中途代次失效或中止时的即时拦截。
-- `tests/bash-readonly.test.ts` 与 `tests/search-boundaries.test.ts`：验证 `tree-sitter-bash` 只读命令与参数分类、危险 Git 配置拦截、受控 `xargs` 路径验证、忽略宿主 `RIPGREP_CONFIG_PATH` 的 `--follow` 设置，以及 dream 对原始 session 目录的只读访问。
+- `tests/bash-readonly.test.ts` 与 `tests/search-boundaries.test.ts`：验证 `tree-sitter-bash` 只读命令与参数分类、危险 Git 配置拦截、静态校验后的原生 `xargs` 执行、忽略宿主 `RIPGREP_CONFIG_PATH` 的 `--follow` 设置，以及 dream 对原始 session 目录的只读访问。
 - `tests/concurrency.test.ts`：通过多子进程 worker（`lock-worker.ts`、`cas-worker.ts`）验证跨进程锁互斥、死进程锁恢复、dream 时间戳 CAS 与文件并发编辑 CAS。
 - `tests/lifecycle.test.ts`：端到端验证 Pi 钩子生命周期，包括项目信任门控、`enabled: false` 延迟初始化、2 秒预取等待与延迟 `steer` 送达、普通与排队输入的空白门槛、图片归一化去重、完整读取抑制与分支恢复、满 48 小时过期提醒、写后 lint、主 Agent 直接写入去重、三词用户正文门槛、新输入触发 `trailingExtraction`、会话压缩前提取与状态重置、dream 尝试时间保留与异常回滚，以及进程内后台 usage 累计。
 
@@ -99,7 +98,7 @@ PI_OFFLINE=1 pi --no-extensions --extension ./index.ts --list-models __no_such_m
 
 1. **聚焦本地私有文件模式对齐**：项目优先对齐 Claude Code 2.1.296 的本地项目记忆文件格式、索引与取回窗口、selector、回合后提取、定期 dream 整理及生命周期。明确不实现 BM25，也不实现任何依赖服务端 memory API 的功能（包括账户记忆、团队或组织共享存储、`claude.ai` Project memory、服务端同步、embedding、ranking 和 `memory_search`）。切勿通过隐藏开关或可选依赖引入这些能力，也不要把局部相似夸大为完整产品兼容。
 2. **保持主会话工具原样，后台复用 Pi 原生工具工厂**：严禁注册或覆盖主会话的同名内置工具。后台子 Agent 固定使用 Pi 原生名称与 schema 的 `read`、`find`、`grep`、`write`、`edit` 和 `bash`（以及主会话开启 `codemode` 时的任务内原生 `codemode`，通过公开的 `createCodemodeExtension()` 接入，不深层导入 Pi 内部私有模块）。不要增加独立的 `Delete` 工具或不受限制的 Shell。
-3. **坚持应用层边界与并发正确性，不夸大为操作系统沙箱**：Pi 原生工具的 `cwd` 不是安全边界。后台工具外层必须保留项目信任、批准读取根目录、memory 目录小写 `.md` 写入包含、符号链接拒绝、普通文本读取基线、代次检查、跨进程锁与原子替换。受限 `bash` 必须保留 AST 分类、命令参数白名单、受信任可执行文件解析、受控 `xargs` 与独立子进程搜索排除规则（严禁通过临时篡改主进程 `process.env` 来限制搜索）。这些机制用于限定后台工具能力与保证并发安全，不得在文档中描述为抵抗同用户恶意进程的完整 OS 级沙箱。
+3. **坚持应用层边界与并发正确性，不夸大为操作系统沙箱**：Pi 原生工具的 `cwd` 不是安全边界。后台工具外层必须保留项目信任、批准读取根目录、memory 目录小写 `.md` 写入包含、符号链接拒绝、普通文本读取基线、代次检查、跨进程锁与原子替换。受限 `bash` 必须保留 AST 分类、命令参数白名单、原生执行前的显式路径检查与独立子进程搜索排除规则（严禁通过临时篡改主进程 `process.env` 来限制搜索）。这些机制用于限定后台工具能力与保证并发安全，不得在文档中描述为抵抗同用户恶意进程的完整 OS 级沙箱。
 4. **严格保护静态提示词基线与 `docs/research/` 边界**：
    - `docs/research/` 只记录 Claude Code 2.1.296 二进制的逆向结论、原始提示词、工具定义与证据，必须保留 `Claude Code` 原名与原文，不得混入 Pi 的实现或适配说明。
    - 运行时四份核心提示词（主记忆、selector、extractor、dream）的静态文本必须与 `tests/fixtures/prompts/*.txt` 保持一致，只允许四类替换（`CLAUDE.md` 改为 `AGENTS.md`、Pi 工具与字段名替换、删除不支持功能的专属段落、`Claude Code` 改为 `the agent`）以及 selector 工具模式末尾的固定 `select_memories` 调用指令。后台工具列表与 codemode 说明通过独立的 `backgroundToolPrompt()` 追加在系统提示词末尾，不得通过篡改 Claude 派生提示词基线来容纳宿主适配。

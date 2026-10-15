@@ -131,6 +131,17 @@ test("validates printf arithmetic operands", () => {
 	denies("printf '%*s' 1+1 text");
 	denies("xargs printf '%d\\n'");
 	allows("xargs printf '%s\\n'");
+	allows("xargs");
+	allows("xargs cat");
+	allows("xargs -I{} head -n 1 -- {}");
+	allows("xargs -I@ cat -- @");
+	allows("xargs sort --");
+	denies("xargs sort");
+	denies("xargs rg needle");
+	denies("xargs rm");
+	denies("xargs sh -c");
+	denies("xargs -I{} {}");
+	denies("xargs -I{} printf {}");
 	for (const option of ["-L 1", "-P 2", "-s 100", "-t", "-x"]) allows(`xargs ${option} echo`);
 });
 
