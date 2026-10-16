@@ -27,7 +27,7 @@ Pi Project Memory 是 Pi 的项目自动记忆扩展。它把每个项目的长�
 pi install npm:pi-project-memory
 ```
 
-其他安装方式见下文[安装与管理](#安装与管理)。
+Termux 用户还需完成[原生依赖的手动编译](#在-termux-中安装)。其他安装方式见下文[安装与管理](#安装与管理)。
 
 ### 2. 启动并检查状态
 
@@ -51,14 +51,25 @@ pi install npm:pi-project-memory
 
 ### 在 Termux 中安装
 
-先安装运行工具及编译原生 `tree-sitter` 依赖所需的工具链，再通过 Pi 安装扩展：
+首先，安装所需工具和扩展。
 
 ```bash
 pkg install nodejs-lts bash git ripgrep fd python make clang
 pi install npm:pi-project-memory
 ```
 
-如果编译时提示 `Undefined variable android_ndk_path`，请先执行 `export GYP_DEFINES="android_ndk_path=''"`，再重新安装。
+接着，使用 npm 12 或更高版本时，放行安装脚本。旧版 npm 可跳过此命令。
+
+```bash
+npm --prefix ~/.pi/agent/npm install-scripts approve tree-sitter tree-sitter-bash
+```
+
+最后，手动编译依赖。
+
+```bash
+GYP_DEFINES="android_ndk_path=''" npm --prefix ~/.pi/agent/npm rebuild \
+  tree-sitter tree-sitter-bash --ignore-scripts=false --foreground-scripts
+```
 
 ### 从 GitHub 安装
 
@@ -74,8 +85,6 @@ cd pi-project-memory
 pnpm install
 pi install .
 ```
-
-只有从本地源码安装时需要手动执行 `pnpm install`。通过 npm 或 GitHub 安装时，Pi 会自动安装运行依赖。
 
 ### 单次试用与日常包管理
 

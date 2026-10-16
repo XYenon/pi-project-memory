@@ -27,7 +27,7 @@ The recommended way to install is from npm:
 pi install npm:pi-project-memory
 ```
 
-For other installation methods, see [Installation and management](#installation-and-management) below.
+On Termux, also complete the [manual native dependency build](#install-on-termux). For other installation methods, see [Installation and management](#installation-and-management) below.
 
 ### 2. Start and check status
 
@@ -51,14 +51,25 @@ pi install npm:pi-project-memory
 
 ### Install on Termux
 
-Install the runtime tools and the compiler toolchain needed for the native `tree-sitter` dependencies, then install the extension in Pi:
+First, install the required tools and the extension.
 
 ```bash
 pkg install nodejs-lts bash git ripgrep fd python make clang
 pi install npm:pi-project-memory
 ```
 
-If compilation reports `Undefined variable android_ndk_path`, set `export GYP_DEFINES="android_ndk_path=''"` and retry the installation.
+Next, approve the installation scripts on npm 12 or later. Skip this command on older npm versions.
+
+```bash
+npm --prefix ~/.pi/agent/npm install-scripts approve tree-sitter tree-sitter-bash
+```
+
+Finally, manually compile the dependencies.
+
+```bash
+GYP_DEFINES="android_ndk_path=''" npm --prefix ~/.pi/agent/npm rebuild \
+  tree-sitter tree-sitter-bash --ignore-scripts=false --foreground-scripts
+```
 
 ### Install from GitHub
 
@@ -74,8 +85,6 @@ cd pi-project-memory
 pnpm install
 pi install .
 ```
-
-Run `pnpm install` by hand only when you install from local source. When you install from npm or GitHub, Pi installs the runtime dependencies for you.
 
 ### One-off trial and everyday package management
 
