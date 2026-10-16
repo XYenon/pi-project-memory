@@ -1,6 +1,6 @@
 {
   "name": "pi-project-memory",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Local project auto-memory extension for Pi",
   "author": {
     "name": "XYenon",
@@ -63,6 +63,7 @@
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "devDependencies": {
@@ -70,6 +71,7 @@
     "@earendil-works/pi-agent-core": "^1.2.0",
     "@earendil-works/pi-ai": "^1.2.0",
     "@earendil-works/pi-coding-agent": "^1.2.0",
+    "@earendil-works/pi-tui": "^1.2.0",
     "@types/node": "^26.6.5",
     "markdownlint-cli2": "^0.23.3",
     "prettier": "^3.9.10",

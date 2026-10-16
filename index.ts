@@ -2,7 +2,12 @@ import { lstat, realpath } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
-import { convertToLlm, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	convertToLlm,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import type { ChildCodemodeOptions } from "./src/child-codemode.ts";
 import { configPath, loadConfig } from "./src/config.ts";
 import {
@@ -16,7 +21,7 @@ import {
 	sanitizeRecentMessages,
 	selectRelevantMemories,
 } from "./src/models.ts";
-import { displayPath, initializeProjectPaths, resolveProjectPaths } from "./src/paths.ts";
+import { assertContainedMarkdown, displayPath, initializeProjectPaths, resolveProjectPaths } from "./src/paths.ts";
 import {
 	dreamPrompt,
 	extractionPrompt,
@@ -44,6 +49,7 @@ import {
 	snapshotMarkdownFile,
 } from "./src/store.ts";
 import type { ChildRunResult, ProjectMemoryConfig, ProjectPaths, RecallItem } from "./src/types.ts";
+import { type MemoryModelView, type MemoryPanelData, openMemoryPanel } from "./src/ui.ts";
 
 const RECALL_MESSAGE = "pi-project-memory-recall";
 const UPDATE_MESSAGE = "pi-project-memory-update";
@@ -359,6 +365,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 		if (state && !ctx.isProjectTrusted()) {
 			cancelRecallPrefetch(state);
 			invalidatePasses(state);
+			updateMaintenanceStatus(ctx, state);
 			return;
 		}
 		if (!state?.config.enabled || !paths) return;
@@ -618,6 +625,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 		const state = runtime;
 		if (!state) return;
 		state.shuttingDown = true;
+		updateMaintenanceStatus(ctx, state);
 		cancelRecallPrefetch(state);
 		cancelIdleTimer(state);
 		const drain = (async () => {
@@ -644,130 +652,163 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 		runtime = undefined;
 	});
 
-	pi.registerCommand("memory", {
-		description: "Inspect or run project auto-memory: status | list | extract | dream | reload-config",
-		handler: async (args, ctx) => {
-			const state = runtime;
-			if (!state)
-				return ctx.ui.notify(
-					blockedByTrust
-						? "Project memory is disabled until this project is trusted"
-						: "Project memory has not initialized",
-					"error",
-				);
-			if (!ctx.isProjectTrusted()) {
+	async function runMemoryCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+		const state = runtime;
+		if (!state)
+			return ctx.ui.notify(
+				blockedByTrust
+					? "Project memory is disabled until this project is trusted"
+					: "Project memory has not initialized",
+				"error",
+			);
+		if (!ctx.isProjectTrusted()) {
+			invalidatePasses(state);
+			updateMaintenanceStatus(ctx, state);
+			return ctx.ui.notify("Project trust was revoked; project memory is disabled", "error");
+		}
+		const command = args.trim() || "status";
+		if (command === "reload-config") {
+			const previous = state.config;
+			let next: ProjectMemoryConfig;
+			try {
+				next = await loadConfig();
+			} catch (error) {
+				return ctx.ui.notify(errorMessage(error), "error");
+			}
+			const deferredDirectoryChange = next.autoMemoryDirectory !== state.sessionMemoryDirectory;
+			next.autoMemoryDirectory = state.sessionMemoryDirectory;
+			const enabledPaths = !previous.enabled && next.enabled ? await initializeRuntimePaths(ctx, next) : undefined;
+			cancelRecallPrefetch(state);
+			cancelIdleTimer(state);
+			if (previous.enabled && next.enabled) invalidatePasses(state);
+			state.config = next;
+			state.memoryIndexPrompt = undefined;
+			state.parentContext = undefined;
+			state.selectorHistory.length = 0;
+			state.lastDreamScanAt = 0;
+			if (previous.enabled && !next.enabled) {
 				invalidatePasses(state);
-				return ctx.ui.notify("Project trust was revoked; project memory is disabled", "error");
+				state.paths = undefined;
+				state.turnSnapshot = new Map();
+				state.pendingMemoryUpdates.length = 0;
+			} else if (!previous.enabled && next.enabled && enabledPaths) {
+				state.paths = enabledPaths;
+				state.turnSnapshot = await snapshotMarkdown(enabledPaths.memoryDir);
 			}
-			const [command = "status"] = args.trim().split(/\s+/);
-			if (command === "reload-config") {
-				const previous = state.config;
-				let next: ProjectMemoryConfig;
-				try {
-					next = await loadConfig();
-				} catch (error) {
-					return ctx.ui.notify(errorMessage(error), "error");
-				}
-				const deferredDirectoryChange = next.autoMemoryDirectory !== state.sessionMemoryDirectory;
-				next.autoMemoryDirectory = state.sessionMemoryDirectory;
-				const enabledPaths = !previous.enabled && next.enabled ? await initializeRuntimePaths(ctx, next) : undefined;
-				cancelRecallPrefetch(state);
-				cancelIdleTimer(state);
-				if (previous.enabled && next.enabled) invalidatePasses(state);
-				state.config = next;
-				state.memoryIndexPrompt = undefined;
-				state.parentContext = undefined;
-				state.selectorHistory.length = 0;
-				state.lastDreamScanAt = 0;
-				if (previous.enabled && !next.enabled) {
-					invalidatePasses(state);
-					state.paths = undefined;
-					state.turnSnapshot = new Map();
-					state.pendingMemoryUpdates.length = 0;
-				} else if (!previous.enabled && next.enabled && enabledPaths) {
-					state.paths = enabledPaths;
-					state.turnSnapshot = await snapshotMarkdown(enabledPaths.memoryDir);
-				}
-				if (
-					state.config.enabled &&
-					state.config.extraction.enabled &&
-					hasUserProse(cursorSlice(ctx, state.cursorEntryId))
-				)
-					scheduleIdle(ctx, state);
-				return ctx.ui.notify(
-					`Reloaded ${configPath()}${deferredDirectoryChange ? "; autoMemoryDirectory changes apply after the next session start" : ""}`,
-					"info",
-				);
-			}
-			if (command === "status" && (!state.config.enabled || !state.paths)) {
-				return ctx.ui.notify(
-					[
-						`Project: ${ctx.cwd}`,
-						"Auto-memory: disabled",
-						`Extraction: ${state.config.extraction.enabled ? "enabled, held by auto-memory" : "disabled"}`,
-						`Auto-dream: ${state.config.dream.enabled ? "enabled, held by auto-memory" : "disabled"}`,
-						"Memory directory: not initialized",
-					].join("\n"),
-					"info",
-				);
-			}
-			if (!state.config.enabled || !state.paths) {
-				return ctx.ui.notify(
-					"Project memory is disabled by config; only status and reload-config are available",
-					"error",
-				);
-			}
-			if (command === "list") {
-				const topics = await scanTopics(state.paths.memoryDir);
-				return ctx.ui.notify(
-					topics.length
-						? topics
-								.map((topic) => `[${topic.type}] ${topic.filename} — ${topic.description || "(no description)"}`)
-								.join("\n")
-						: "No memory topics",
-					"info",
-				);
-			}
-			if (command === "extract") {
-				await trackExtractionPreparation(state, () => scheduleExtraction(ctx, state, "manual"));
-				return;
-			}
-			if (command === "dream") {
-				if (!state.config.dream.enabled)
-					return ctx.ui.notify("Memory dream is disabled by the global dream gate", "warning");
-				await trackMaintenance(state, () => maybeDream(ctx, state, true));
-				return;
-			}
-			if (command !== "status") return ctx.ui.notify("Usage: /memory status|list|extract|dream|reload-config", "error");
-			const topics = await scanTopics(state.paths.memoryDir);
-			const modelStatus = (role: "selector" | "extractor" | "dream") => {
-				const configured = state.config.models[role];
-				try {
-					const model = resolveRoleModel(role, configured, ctx);
-					const thinking = effectiveThinkingLevel(model, configured.thinkingLevel, ctx.thinkingLevel);
-					return `${formatModel(configured.model, ctx)} [available: ${model.provider}/${model.id}; thinking ${configured.thinkingLevel} → ${thinking}; maxTokens ${configured.maxTokens}]`;
-				} catch (error) {
-					return `${formatModel(configured.model, ctx)} [unavailable: ${errorMessage(error)}]`;
-				}
-			};
-			ctx.ui.notify(
+			if (
+				state.config.enabled &&
+				state.config.extraction.enabled &&
+				hasUserProse(cursorSlice(ctx, state.cursorEntryId))
+			)
+				scheduleIdle(ctx, state);
+			updateMaintenanceStatus(ctx, state);
+			return ctx.ui.notify(
+				`Reloaded ${configPath()}${deferredDirectoryChange ? "; autoMemoryDirectory changes apply after the next session start" : ""}`,
+				"info",
+			);
+		}
+		if (command === "status" && (!state.config.enabled || !state.paths)) {
+			return ctx.ui.notify(
 				[
-					`Project: ${state.paths.projectRoot}`,
-					`Memory: ${displayPath(state.paths.memoryDir)}`,
-					`Topics: ${topics.length}`,
-					`Selector: ${modelStatus("selector")} (${state.config.models.selector.structuredOutput ? "native JSON Schema when supported, otherwise same-model schema tool" : "JSON Schema tool"}, ${state.config.models.selector.maxTokens} output tokens)`,
-					`Extractor: ${modelStatus("extractor")}`,
-					`Dream: ${modelStatus("dream")}`,
-					`Extraction: ${state.config.extraction.enabled ? "enabled" : "disabled"}`,
-					`Auto-memory: ${state.config.enabled ? "enabled" : "disabled"}`,
-					`Auto-dream: ${state.config.dream.enabled ? "enabled" : "disabled"}`,
-					`Recall: ${state.recallBytes}/${RECALL_BUDGET} characters`,
-					`Background usage: selector ${formatUsage(state.backgroundUsage.selector)}; extractor ${formatUsage(state.backgroundUsage.extractor)}; dream ${formatUsage(state.backgroundUsage.dream)}`,
-					`Extraction pass: ${state.activeExtraction ? "running" : "idle"}${state.lastExtractionError ? `; last error: ${state.lastExtractionError}` : ""}`,
-					`Dream pass: ${state.activeDream ? "running" : "idle"}${state.lastDreamError ? `; last error: ${state.lastDreamError}` : ""}`,
+					`Project: ${ctx.cwd}`,
+					"Auto-memory: disabled",
+					`Extraction: ${state.config.extraction.enabled ? "enabled, held by auto-memory" : "disabled"}`,
+					`Auto-dream: ${state.config.dream.enabled ? "enabled, held by auto-memory" : "disabled"}`,
+					"Memory directory: not initialized",
 				].join("\n"),
 				"info",
 			);
+		}
+		if (!state.config.enabled || !state.paths) {
+			return ctx.ui.notify(
+				"Project memory is disabled by config; only status and reload-config are available",
+				"error",
+			);
+		}
+		if (command === "list") {
+			const topics = await scanTopics(state.paths.memoryDir);
+			return ctx.ui.notify(
+				topics.length
+					? topics
+							.map((topic) => `[${topic.type}] ${topic.filename} — ${topic.description || "(no description)"}`)
+							.join("\n")
+					: "No memory topics",
+				"info",
+			);
+		}
+		if (command === "extract") {
+			await trackExtractionPreparation(state, () => scheduleExtraction(ctx, state, "manual"));
+			return;
+		}
+		if (command === "dream") {
+			if (!state.config.dream.enabled)
+				return ctx.ui.notify("Memory dream is disabled by the global dream gate", "warning");
+			await trackMaintenance(state, () => maybeDream(ctx, state, true));
+			return;
+		}
+		if (command !== "status") return ctx.ui.notify("Usage: /memory status|list|extract|dream|reload-config", "error");
+		const topics = await scanTopics(state.paths.memoryDir);
+		ctx.ui.notify(memoryStatusLines(state, ctx, topics.length).join("\n"), "info");
+	}
+
+	pi.registerCommand("memory", {
+		description: "Open project memory: browse, search, preview, extract, or dream",
+		getArgumentCompletions: (prefix) =>
+			["status", "list", "extract", "dream", "reload-config"]
+				.filter((command) => command.startsWith(prefix))
+				.map((command) => ({ value: command, label: command })),
+		handler: async (args, ctx) => {
+			const command = args.trim();
+			if (ctx.mode !== "tui" || !["", "status", "list"].includes(command)) return runMemoryCommand(args, ctx);
+			while (runtime && ctx.isProjectTrusted()) {
+				const state = runtime;
+				const generation = state.generation;
+				const paths = state.paths;
+				const topics = paths ? await scanTopics(paths.memoryDir) : [];
+				const data: MemoryPanelData = {
+					project: paths?.projectRoot ?? ctx.cwd,
+					configFile: displayPath(configPath()),
+					enabled: state.config.enabled,
+					dreamEnabled: state.config.dream.enabled,
+					extracting: !!state.activeExtraction,
+					dreaming: !!state.activeDream,
+					recallCharacters: state.recallBytes,
+					recallBudget: RECALL_BUDGET,
+					topics,
+					overview: [
+						...(state.config.enabled
+							? [
+									`Selector: ${state.prefetch && !state.prefetch.result && !state.prefetch.controller.signal.aborted ? "running" : "automatic"}`,
+									`Extractor: ${state.activeExtraction ? "running" : state.config.extraction.enabled ? "automatic" : "manual only"}`,
+									`Dream: ${state.activeDream ? "running" : state.config.dream.enabled ? "automatic" : "disabled"}`,
+								]
+							: ["Memory is disabled. Edit config.json and reload configuration to enable it."]),
+						`Memory: ${paths ? displayPath(paths.memoryDir) : "not initialized; enable memory in config.json"}`,
+						...(state.lastExtractionError ? [`Extractor error: ${state.lastExtractionError}`] : []),
+						...(state.lastDreamError ? [`Dream error: ${state.lastDreamError}`] : []),
+					],
+					models: memoryModelViews(state, ctx),
+				};
+				const action = await openMemoryPanel(
+					ctx,
+					data,
+					async (topic) => {
+						if (!paths || runtime !== state || state.generation !== generation || !ctx.isProjectTrusted())
+							throw new Error("Memory session changed. Close and reopen /memory.");
+						assertContainedMarkdown(paths.memoryDir, topic.filePath);
+						if (!(await safeMainMemoryTarget(paths.memoryDir, topic.filePath)))
+							throw new Error("Memory file is no longer a regular file inside the memory directory.");
+						const item = await recallTopic(topic);
+						if (runtime !== state || state.generation !== generation || !ctx.isProjectTrusted())
+							throw new Error("Memory session changed. Close and reopen /memory.");
+						return `File: ${topic.filePath}\nType: ${topic.type}\n${topic.description}\n\n${item.content}${item.truncated ? "\n\nPreview limited to 200 lines or 4 KiB. Open the file directly for its full contents." : ""}`;
+					},
+					command === "list" ? "topics" : "overview",
+				);
+				if (!action) return;
+				if (action !== "refresh") await runMemoryCommand(action, ctx);
+			}
+			return runMemoryCommand(args, ctx);
 		},
 	});
 }
@@ -1046,6 +1087,11 @@ async function scheduleExtraction(
 		return "consumed";
 	}
 	if (!hasUserProse(sinceCursor)) {
+		if (manual && ctx.hasUI)
+			ctx.ui.notify(
+				"Nothing to extract. Add a user message with at least three whitespace-separated words, or ask the agent to save a memory directly.",
+				"info",
+			);
 		if (!manual) state.cursorEntryId = leafId;
 		return "consumed";
 	}
@@ -1055,6 +1101,7 @@ async function scheduleExtraction(
 		return "failed";
 	}
 	if (state.activeExtraction) {
+		if (manual && ctx.hasUI) ctx.ui.notify("Memory extraction is already running; pending input will follow.", "info");
 		state.trailingExtraction = true;
 		return "failed";
 	}
@@ -1132,6 +1179,8 @@ async function scheduleExtraction(
 				state.handledDirectWriteEpoch = Math.max(state.handledDirectWriteEpoch, directWriteEpoch);
 				if (result.touchedPaths.length > 0 && ctx.hasUI)
 					ctx.ui.notify(`Project memory updated: ${result.touchedPaths.join(", ")}`, "info");
+				else if (manual && !result.error && ctx.hasUI)
+					ctx.ui.notify("Extraction complete. No memory changes were needed.", "info");
 				return result;
 			})
 			.catch((error) => {
@@ -1143,8 +1192,10 @@ async function scheduleExtraction(
 				stopValidityMonitor();
 				if (state.extractionAbortController === abortController) state.extractionAbortController = undefined;
 				if (state.activeExtraction === pass) state.activeExtraction = undefined;
+				if (operationIsCurrent(state, ctx, identity)) updateMaintenanceStatus(ctx, state);
 			});
 		state.activeExtraction = pass;
+		updateMaintenanceStatus(ctx, state);
 		const result = await pass;
 		if (!result || !operationIsCurrent(state, ctx, identity) || abortController.signal.aborted) return "failed";
 	} finally {
@@ -1269,8 +1320,10 @@ async function maybeDream(ctx: ExtensionContext, state: RuntimeState, manual: bo
 			})
 			.finally(() => {
 				if (state.activeDream === pass) state.activeDream = undefined;
+				if (operationIsCurrent(state, ctx, identity)) updateMaintenanceStatus(ctx, state);
 			});
 		state.activeDream = pass;
+		updateMaintenanceStatus(ctx, state);
 		await pass;
 	} catch (error) {
 		await rollbackReservation();
@@ -1427,6 +1480,98 @@ function staleMemoryToolReminder(mtimeMs: number): string {
 	return days <= 1
 		? ""
 		: `<system-reminder>\nThis memory is ${days} days old. Memories are point-in-time observations, not live state — claims about code behavior or file:line citations may be outdated. Verify against current code before asserting as fact.\n</system-reminder>`;
+}
+
+function updateMaintenanceStatus(ctx: ExtensionContext, state: RuntimeState): void {
+	if (ctx.mode !== "tui") return;
+	const tasks =
+		state.config.enabled && !state.shuttingDown && ctx.isProjectTrusted()
+			? [
+					state.activeExtraction && !state.extractionAbortController?.signal.aborted ? "Extracting" : "",
+					state.activeDream && !state.dreamAbortController?.signal.aborted ? "Dreaming" : "",
+				].filter(Boolean)
+			: [];
+	ctx.ui.setStatus("project-memory", tasks.length ? `Memory: ${tasks.join(" · ")}` : undefined);
+}
+
+function memoryModelViews(state: RuntimeState, ctx: ExtensionContext): MemoryModelView[] {
+	return (["selector", "extractor", "dream"] as const).map((role) => {
+		const configured = state.config.models[role];
+		const active =
+			role === "selector"
+				? state.prefetch && !state.prefetch.result && !state.prefetch.controller.signal.aborted
+				: role === "extractor"
+					? state.activeExtraction
+					: state.activeDream;
+		const activity = !state.config.enabled
+			? "Disabled with auto-memory"
+			: active
+				? "Running"
+				: role === "extractor" && !state.config.extraction.enabled
+					? "Idle / manual only"
+					: role === "dream" && !state.config.dream.enabled
+						? "Disabled"
+						: "Idle / automatic";
+		const view: MemoryModelView = {
+			role,
+			model: configured.model === "inherit" && ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : configured.model,
+			inherited: configured.model === "inherit",
+			thinking: "Not resolved",
+			maxTokens: configured.maxTokens,
+			outputMode:
+				role === "selector"
+					? state.config.models.selector.structuredOutput
+						? "Auto (native JSON Schema / schema tool)"
+						: "Schema tool"
+					: undefined,
+			activity,
+			lastError: role === "extractor" ? state.lastExtractionError : role === "dream" ? state.lastDreamError : undefined,
+			totalTokens: state.backgroundUsage[role].totalTokens,
+			cost: state.backgroundUsage[role].cost.total,
+		};
+		try {
+			const model = resolveRoleModel(role, configured, ctx);
+			view.model = `${model.provider}/${model.id}`;
+			const thinking = effectiveThinkingLevel(model, configured.thinkingLevel, ctx.thinkingLevel);
+			view.thinking =
+				configured.thinkingLevel === "inherit"
+					? `${thinking} (from session)`
+					: thinking !== configured.thinkingLevel
+						? `${thinking} (requested ${configured.thinkingLevel})`
+						: thinking;
+		} catch (error) {
+			view.availabilityError = errorMessage(error);
+		}
+		return view;
+	});
+}
+
+function memoryStatusLines(state: RuntimeState, ctx: ExtensionContext, topicCount: number): string[] {
+	const modelStatus = (role: "selector" | "extractor" | "dream") => {
+		const configured = state.config.models[role];
+		try {
+			const model = resolveRoleModel(role, configured, ctx);
+			const thinking = effectiveThinkingLevel(model, configured.thinkingLevel, ctx.thinkingLevel);
+			return `${formatModel(configured.model, ctx)} [available: ${model.provider}/${model.id}; thinking ${configured.thinkingLevel} → ${thinking}; maxTokens ${configured.maxTokens}]`;
+		} catch (error) {
+			return `${formatModel(configured.model, ctx)} [unavailable: ${errorMessage(error)}]`;
+		}
+	};
+	return [
+		`Project: ${state.paths?.projectRoot ?? ctx.cwd}`,
+		`Memory: ${state.paths ? displayPath(state.paths.memoryDir) : "not initialized"}`,
+		`Topics: ${topicCount}`,
+		`Selector: ${modelStatus("selector")} (${state.config.models.selector.structuredOutput ? "native JSON Schema when supported, otherwise same-model schema tool" : "JSON Schema tool"}, ${state.config.models.selector.maxTokens} output tokens)`,
+		`Extractor: ${modelStatus("extractor")}`,
+		`Dream: ${modelStatus("dream")}`,
+		`Extraction: ${state.config.extraction.enabled ? "enabled" : "disabled"}`,
+		`Auto-memory: ${state.config.enabled ? "enabled" : "disabled"}`,
+		`Auto-dream: ${state.config.dream.enabled ? "enabled" : "disabled"}`,
+		`Recall: ${state.recallBytes}/${RECALL_BUDGET} characters`,
+		`Background usage: selector ${formatUsage(state.backgroundUsage.selector)}; extractor ${formatUsage(state.backgroundUsage.extractor)}; dream ${formatUsage(state.backgroundUsage.dream)}`,
+		`Extraction pass: ${state.activeExtraction ? "running" : "idle"}${state.lastExtractionError ? `; last error: ${state.lastExtractionError}` : ""}`,
+		`Dream pass: ${state.activeDream ? "running" : "idle"}${state.lastDreamError ? `; last error: ${state.lastDreamError}` : ""}`,
+	];
 }
 
 function formatUsage(usage: Usage): string {

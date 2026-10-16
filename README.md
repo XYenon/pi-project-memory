@@ -34,10 +34,10 @@ On Termux, also complete the [manual native dependency build](#install-on-termux
 Enter a project directory that you have already trusted in Pi, start Pi, and run:
 
 ```text
-/memory status
+/memory
 ```
 
-The command shows the current project path, the memory directory location, the number of topics, the model settings for the three background tasks (selector, extractor, and dream), and the cumulative usage. If the status looks correct, chat as usual.
+The panel shows project status, searchable memory topics, and model settings and usage.
 
 To extract information from the current conversation into memory right away, run `/memory extract` at any time.
 
@@ -95,15 +95,15 @@ pi install .
 
 ## Command reference
 
-| Command                 | Purpose                                                                                                                                                                                                                        |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/memory status`        | Shows the current project path, memory directory, topic count, model and parameter status for the three background tasks, the auto switch, recall usage for the current branch, and the cumulative background tokens and cost. |
-| `/memory list`          | Lists all memory topics in the current project, with type, relative path, and one-line description.                                                                                                                            |
-| `/memory extract`       | Runs memory extraction once right away. It processes conversation that has not been extracted yet. You can run it by hand even when automatic extraction is off in the configuration.                                          |
-| `/memory dream`         | Runs memory consolidation and merging once right away. It skips the time interval and session count conditions, but it still requires `dream.enabled` to be `true` in the configuration.                                       |
-| `/memory reload-config` | Reloads the user-level config file. Changes to the model, extraction, and consolidation settings take effect right away. A change to the `autoMemoryDirectory` path takes effect at the next session start.                    |
+| Command                       | Purpose                                                                                                                                                                                                     |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/memory` or `/memory status` | Opens the memory panel in the terminal. RPC and other modes retain the text status report.                                                                                                                  |
+| `/memory list`                | Opens Topics in the terminal, with search and preview. Other modes list topic types, paths, and descriptions as text.                                                                                       |
+| `/memory extract`             | Runs memory extraction once right away. It processes conversation that has not been extracted yet. You can run it by hand even when automatic extraction is off in the configuration.                       |
+| `/memory dream`               | Runs memory consolidation and merging once right away. It skips the time interval and session count conditions, but it still requires `dream.enabled` to be `true` in the configuration.                    |
+| `/memory reload-config`       | Reloads the user-level config file. Changes to the model, extraction, and consolidation settings take effect right away. A change to the `autoMemoryDirectory` path takes effect at the next session start. |
 
-Running `/memory` alone is the same as `/memory status`. If you enter an unknown subcommand, Pi shows the list of available commands.
+Use Tab to switch views, type to search in Topics, and press Enter to preview. Escape goes back or closes the panel. Subcommands support completion.
 
 ## Common configuration entry points
 

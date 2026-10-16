@@ -11,8 +11,11 @@ import {
 	createWriteTool,
 	type ExtensionAPI,
 	type ExtensionContext,
+	type KeybindingsManager as ExtensionKeybindingsManager,
 	SessionManager,
+	type Theme,
 } from "@earendil-works/pi-coding-agent";
+import { type Component, KeybindingsManager, type TUI, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import projectMemoryExtension from "../index.ts";
 import { resolveProjectPaths } from "../src/paths.ts";
 import { mainMemoryPrompt } from "../src/prompts.ts";
@@ -105,6 +108,7 @@ async function createLifecycleHarness(
 
 	const faux = createFauxCore({ models: [{ id: "lifecycle-model", reasoning: false }] });
 	const notices: Array<{ message: string; level: string }> = [];
+	const statusUpdates: Array<{ key: string; text: string | undefined }> = [];
 	const projection =
 		options.projection ??
 		({
@@ -129,6 +133,7 @@ async function createLifecycleHarness(
 		},
 		ui: {
 			notify: (message: string, level: string) => notices.push({ message, level }),
+			setStatus: (key: string, text: string | undefined) => statusUpdates.push({ key, text }),
 		},
 		sessionManager: {
 			getBranch: () => options.branch ?? [],
@@ -152,6 +157,7 @@ async function createLifecycleHarness(
 		configFile,
 		faux,
 		notices,
+		statusUpdates,
 		projection,
 		context,
 		extension,
@@ -161,6 +167,119 @@ async function createLifecycleHarness(
 		},
 	};
 }
+
+function mockMemoryPanel(context: ExtensionContext, interact: (component: Component) => Promise<void> | void): void {
+	context.mode = "tui";
+	context.ui.custom = (factory) =>
+		new Promise((resolve, reject) => {
+			const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Theme;
+			const tui = { terminal: { rows: 32 }, requestRender() {} } as unknown as TUI;
+			void Promise.resolve(
+				factory(tui, theme, new KeybindingsManager(TUI_KEYBINDINGS) as ExtensionKeybindingsManager, resolve),
+			)
+				.then(interact)
+				.catch(reject);
+		});
+}
+
+test("memory panel previews local files without charging recall or injecting context", async (t) => {
+	const h = await createLifecycleHarness(t, { config: { extraction: { enabled: false }, dream: { enabled: false } } });
+	await writeFile(
+		join(h.paths.memoryDir, "preference.md"),
+		"---\nname: preference\ndescription: Chinese typography\nmetadata:\n  type: feedback\n---\nUse readable spacing.\n",
+	);
+	mockMemoryPanel(h.context, async (component) => {
+		const overview = component.render(100).join("\n");
+		assert.match(overview, /\[Overview\]/);
+		assert.match(overview, /Selector: automatic/);
+		assert.match(overview, /Extractor: manual only/);
+		assert.match(overview, /Dream: disabled/);
+		assert.doesNotMatch(overview, /Consolidat/);
+		component.handleInput?.("\t");
+		assert.match(component.render(100).join("\n"), /preference.md/);
+		component.handleInput?.("\r");
+		await eventually(() => component.render(100).join("\n").includes("Use readable spacing."), "preview should load");
+		component.handleInput?.("\u001b");
+		component.handleInput?.("\t");
+		const models = component.render(100).join("\n");
+		assert.match(models, /Selector\s+Available/);
+		assert.match(models, /Model\s+faux\/lifecycle-model/);
+		assert.match(models, /Source\s+Current session/);
+		assert.doesNotMatch(models, /Extraction pass:|Background usage:/);
+		component.handleInput?.("\u001b");
+	});
+	await h.extension.commands.get("memory")?.handler("", h.context);
+	assert.equal(h.extension.sentMessages.length, 0);
+	h.context.mode = "rpc";
+	await h.extension.commands.get("memory")?.handler("status", h.context);
+	assert.match(h.notices.at(-1)?.message ?? "", /Recall: 0\/61440/);
+});
+
+test("memory panel refreshes disabled configuration without initializing memory paths", async (t) => {
+	const h = await createLifecycleHarness(t, { config: { enabled: false } });
+	let screens = 0;
+	mockMemoryPanel(h.context, (component) => {
+		const screen = component.render(100).join("\n");
+		assert.match(screen, /Disabled/);
+		assert.doesNotMatch(screen, /Extract\s+Save durable facts|Dream\s+Merge duplicates/);
+		if (screens++ === 0) {
+			component.handleInput?.("\u001b[B");
+			component.handleInput?.("\r");
+		} else component.handleInput?.("\u001b");
+	});
+	await h.extension.commands.get("memory")?.handler("", h.context);
+	assert.equal(screens, 2);
+	assert.match(h.notices.at(-1)?.message ?? "", /Reloaded/);
+	await assert.rejects(access(h.paths.memoryDir));
+});
+
+test("memory list previews reject files replaced by links outside memory", async (t) => {
+	const h = await createLifecycleHarness(t, { config: { extraction: { enabled: false }, dream: { enabled: false } } });
+	const file = join(h.paths.memoryDir, "replaced.md");
+	const outside = join(h.root, "outside.md");
+	await writeFile(file, "original memory\n");
+	await writeFile(outside, "private outside content\n");
+	mockMemoryPanel(h.context, async (component) => {
+		assert.match(component.render(100).join("\n"), /\[Topics\]/);
+		await rm(file);
+		await symlink(outside, file);
+		component.handleInput?.("\r");
+		await eventually(
+			() => component.render(100).join("\n").includes("Unable to preview"),
+			"unsafe preview should fail",
+		);
+		assert.doesNotMatch(component.render(100).join("\n"), /private outside content/);
+		component.handleInput?.("\u001b");
+		component.handleInput?.("\u001b");
+	});
+	await h.extension.commands.get("memory")?.handler("list", h.context);
+});
+
+test("RPC memory commands keep text output and extraction explains empty input", async (t) => {
+	const h = await createLifecycleHarness(t, { projection: { messages: [], entries: [] } });
+	h.context.mode = "rpc";
+	h.context.ui.custom = () => {
+		throw new Error("RPC must not open terminal UI");
+	};
+	await h.extension.commands.get("memory")?.handler("", h.context);
+	assert.match(h.notices.at(-1)?.message ?? "", /Topics: 0/);
+	await h.extension.commands.get("memory")?.handler("extract", h.context);
+	assert.match(h.notices.at(-1)?.message ?? "", /Nothing to extract/);
+	await h.extension.commands.get("memory")?.handler("list", h.context);
+	assert.match(h.notices.at(-1)?.message ?? "", /No memory topics/);
+});
+
+test("manual extraction reports task progress and completion even without changed files", async (t) => {
+	const h = await createLifecycleHarness(t, {
+		config: { extraction: { idleFlushSeconds: 0 }, dream: { enabled: false } },
+	});
+	h.context.mode = "tui";
+	h.faux.setResponses([fauxAssistantMessage("No new memory.")]);
+	await h.extension.commands.get("memory")?.handler("extract", h.context);
+	assert.ok(h.statusUpdates.some((update) => update.text === "Memory: Extracting"));
+	assert.equal(h.statusUpdates.at(-1)?.text, undefined);
+	assert.match(h.notices.at(-1)?.message ?? "", /Extraction complete.*No memory changes/);
+});
 
 test("Pi lifecycle hooks honor trust, inject memory prompts, and drain shutdown", async (t) => {
 	const root = await createTempDirectory(t, "pi-memory-lifecycle-");
@@ -903,6 +1022,7 @@ test("reload invalidates an active maintenance child", async (t) => {
 	const harness = await createLifecycleHarness(t, {
 		config: { extraction: { idleFlushSeconds: 0 }, dream: { enabled: false } },
 	});
+	harness.context.mode = "tui";
 	let childStarted = false;
 	let childAborted = false;
 	harness.faux.setResponses([
@@ -930,6 +1050,7 @@ test("reload invalidates an active maintenance child", async (t) => {
 	await harness.extension.commands.get("memory")?.handler("reload-config", harness.context);
 	await extraction;
 	assert.equal(childAborted, true);
+	assert.equal(harness.statusUpdates.at(-1)?.text, undefined, "reload must clear the cancelled task status");
 
 	await writeFile(harness.configFile, "{");
 	await harness.extension.commands.get("memory")?.handler("reload-config", harness.context);
