@@ -471,7 +471,7 @@ test("Pi lifecycle hooks honor trust, inject memory prompts, and drain shutdown"
 		},
 		context,
 	);
-	assert.equal((unsafeWrite as { block?: boolean }).block, true);
+	assert.equal(unsafeWrite, undefined);
 	const outside = join(root, "outside.md");
 	const linkedTarget = join(paths.memoryDir, "linked.md");
 	await writeFile(outside, "outside\n");
@@ -486,7 +486,7 @@ test("Pi lifecycle hooks honor trust, inject memory prompts, and drain shutdown"
 		},
 		context,
 	);
-	assert.equal((symlinkWrite as { block?: boolean }).block, true);
+	assert.equal(symlinkWrite, undefined);
 	const symlinkEdit = await extension.emit(
 		"tool_call",
 		{
@@ -497,7 +497,7 @@ test("Pi lifecycle hooks honor trust, inject memory prompts, and drain shutdown"
 		},
 		context,
 	);
-	assert.equal((symlinkEdit as { block?: boolean }).block, true);
+	assert.equal(symlinkEdit, undefined);
 	const preparingExtraction = Promise.resolve(extension.commands.get("memory")?.handler("extract", context));
 	const racingWrite = await extension.emit(
 		"tool_call",
@@ -509,8 +509,7 @@ test("Pi lifecycle hooks honor trust, inject memory prompts, and drain shutdown"
 		},
 		context,
 	);
-	assert.equal((racingWrite as { block?: boolean }).block, true);
-	assert.match((racingWrite as { reason?: string }).reason ?? "", /maintenance is writing/);
+	assert.equal(racingWrite, undefined);
 	await preparingExtraction;
 
 	await extension.commands.get("memory")?.handler("dream", context);

@@ -314,10 +314,6 @@ export function sanitizeMemoryText(value: string): string {
 	return neutralizeReservedTags(cleanDangerousCharacters(value));
 }
 
-export function sanitizePersistedMemoryText(value: string): string {
-	return sanitizeMemoryText(value);
-}
-
 export function hasUnsafeMemoryText(value: string): boolean {
-	return sanitizePersistedMemoryText(value) !== normalizeLineEndings(value);
+	return sanitizeMemoryText(value) !== normalizeLineEndings(value);
 }

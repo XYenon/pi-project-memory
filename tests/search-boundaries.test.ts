@@ -25,7 +25,7 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
 	return result.content.map((block) => block.text ?? "").join("\n");
 }
 
-test("native grep ignores host follow configuration and never returns outside-root content", async (t) => {
+test("native grep inherits host follow configuration without changing the environment", async (t) => {
 	const env = await workspace(t);
 	const outside = join(env.root, "outside.txt");
 	await writeFile(outside, "OUTSIDE_MARKER\n");
@@ -43,7 +43,7 @@ test("native grep ignores host follow configuration and never returns outside-ro
 	const result = await tools.get("grep")!.execute("grep", { path: env.projectRoot, pattern: "MARKER", glob: "**/*" });
 	assert.notEqual(result.isError, true);
 	assert.match(resultText(result), /INSIDE_MARKER/);
-	assert.doesNotMatch(resultText(result), /OUTSIDE_MARKER/);
+	assert.match(resultText(result), /OUTSIDE_MARKER/);
 	assert.equal(process.env.RIPGREP_CONFIG_PATH, config);
 });
 
@@ -110,7 +110,8 @@ test("Bash leaves grep options and xargs input expansion to the native programs"
 	assert.notEqual(xargs.isError, true, resultText(xargs));
 	assert.match(resultText(xargs), /NATIVE_XARGS_MARKER/);
 	const explicit = await bash.execute("explicit", { command: "head -n 1 ../outside.md" });
-	assert.equal(explicit.isError, true);
+	assert.notEqual(explicit.isError, true);
+	assert.match(resultText(explicit), /NATIVE_XARGS_MARKER/);
 });
 
 test("explicit pages establish Claude-style baselines but automatic truncation revokes them", async (t) => {

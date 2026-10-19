@@ -270,11 +270,9 @@
 └── *.md                                     # 主题记忆文件
 
 <os.tmpdir()>/                               # 操作系统临时目录（运行期间按需创建，结束后自动删除）
-├── pi-project-memory-<random>/              # 单次 extractor 或 dream 运行的私有 scratchDir
-│   ├── bash-<uuid>.log                      # 受限 Bash 超出内联长度时的完整输出转存文件
-│   └── codemode-<uuid>.txt                  # 后台 codemode 超出内联长度时的完整输出转存文件
-└── pi-project-memory-search-<random>/       # 单次后台 find / grep 子进程运行的临时隔离目录
-    └── bin/                                 # 注入边界排除规则的 rg / fd 包装脚本
+└── pi-project-memory-<random>/              # 单次 extractor 或 dream 运行的私有 scratchDir
+    ├── bash-<uuid>.log                      # 受限 Bash 超出内联长度时的完整输出转存文件
+    └── codemode-<uuid>.txt                  # 后台 codemode 超出内联长度时的完整输出转存文件
 ```
 
 ### 2. 项目归属、`<project-key>` 计算与碰撞处理
@@ -341,7 +339,6 @@
 
 - **自动清理的临时资源**：
   - 每次后台 extractor 或 dream 运行时创建的 `<tmpdir>/pi-project-memory-<random>/`（含受控命令目录和溢出的工具输出日志），会在该次子任务结束的 `finally` 块中通过 `rm(..., { recursive: true, force: true })` 彻底删除。
-  - 每次后台 `find` 或 `grep` 搜索创建的 `<tmpdir>/pi-project-memory-search-<random>/`，会在该次搜索子进程退出后立即递归删除。
   - 正常释放的 `.lock`、`.lock.recover` 和 `.tmp` 文件会在对应操作结束时立即删除。
 - **持久保留的文件（无后台静默删除）**：
   - `config.json`、`projects/<namespace>/`、`memory-roots/<memory-root-hash>/` 以及 `memory/` 下的 `.md` 文件会长期保留在磁盘上。

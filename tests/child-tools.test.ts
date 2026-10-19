@@ -80,7 +80,7 @@ test("read-only Git commands work from linked worktrees with an approved checkou
 		);
 		for (const command of ["git status --short", "git log --oneline -1"]) {
 			const result = await tools.get("bash")!.execute("git", { command });
-			assert.equal(result.isError === true, !approved, JSON.stringify(result));
+			assert.notEqual(result.isError, true, JSON.stringify(result));
 			if (approved && command.includes("log")) assert.match(JSON.stringify(result.content), /initial/);
 		}
 	}
@@ -232,7 +232,7 @@ test("ordinary explicit Read pages authorize mutations while preserving Pi trans
 	assert.deepEqual([...touchedPaths], ["fact.md"]);
 });
 
-test("native read truncation, images, and unsupported formats keep baseline rules", async (t) => {
+test("native read truncation and images keep baseline rules without extension-based blocking", async (t) => {
 	const { memoryDir, projectRoot, locksDir } = await createToolWorkspace(t, "pi-memory-native-read-contract-");
 	const tools = toolMap(
 		createChildTools({
@@ -271,8 +271,8 @@ test("native read truncation, images, and unsupported formats keep baseline rule
 		const unsupported = join(memoryDir, `unsupported${extension}`);
 		await writeFile(unsupported, "plain text payload");
 		const result = await read.execute(`unsupported-${extension}`, { path: unsupported });
-		assert.equal(result.isError, true);
-		assert.match(result.content[0]?.type === "text" ? result.content[0].text : "", /not supported/);
+		assert.notEqual(result.isError, true);
+		assert.equal(result.structuredContent, "plain text payload");
 	}
 });
 
@@ -313,7 +313,7 @@ test("edit applies Pi multi-edit transformation and recovers only clean stale ed
 	assert.equal(await readFile(topic, "utf8"), "replacement removed the expected text\n");
 });
 
-test("native read, find, and grep stay inside approved roots", async (t) => {
+test("native read, find, and grep can read outside the project and memory directories", async (t) => {
 	const { root, memoryDir, projectRoot, locksDir } = await createToolWorkspace(t, "pi-memory-native-read-");
 	const sessionDir = join(root, "sessions");
 	await mkdir(sessionDir);
@@ -339,9 +339,12 @@ test("native read, find, and grep stay inside approved roots", async (t) => {
 		}),
 	);
 	assert.notEqual((await dreamTools.get("read")!.execute("session", { path: sessionFile })).isError, true);
-	assert.equal((await dreamTools.get("read")!.execute("outside", { path: outside })).isError, true);
-	assert.equal((await dreamTools.get("find")!.execute("find-outside", { path: root, pattern: "**/*" })).isError, true);
-	assert.equal(
+	assert.notEqual((await dreamTools.get("read")!.execute("outside", { path: outside })).isError, true);
+	assert.notEqual(
+		(await dreamTools.get("find")!.execute("find-outside", { path: root, pattern: "**/*" })).isError,
+		true,
+	);
+	assert.notEqual(
 		(await dreamTools.get("grep")!.execute("grep-outside", { path: root, pattern: "needle" })).isError,
 		true,
 	);
@@ -363,10 +366,10 @@ test("native read, find, and grep stay inside approved roots", async (t) => {
 			touchedPaths: new Set(),
 		}),
 	);
-	assert.equal((await extractorTools.get("read")!.execute("session-denied", { path: sessionFile })).isError, true);
+	assert.notEqual((await extractorTools.get("read")!.execute("session", { path: sessionFile })).isError, true);
 });
 
-test("restricted Pi-native Bash permits reads and denies writes or outside paths", async (t) => {
+test("restricted Pi-native Bash permits outside reads and denies writes", async (t) => {
 	const { root, memoryDir, projectRoot, locksDir } = await createToolWorkspace(t, "pi-memory-native-bash-");
 	const scratchDir = join(root, "scratch");
 	await mkdir(scratchDir);
@@ -392,14 +395,13 @@ test("restricted Pi-native Bash permits reads and denies writes or outside paths
 	const readMemory = await extractorBash.execute("read-memory", { command: `head -n 1 ${memoryFile}` });
 	assert.notEqual(readMemory.isError, true);
 	assert.match(readMemory.content[0]?.type === "text" ? readMemory.content[0].text : "", /memory value/);
-	assert.equal((await extractorBash.execute("outside", { command: `cat ${outsideFile}` })).isError, true);
+	assert.notEqual((await extractorBash.execute("outside", { command: `cat ${outsideFile}` })).isError, true);
 	assert.equal((await extractorBash.execute("write", { command: `echo changed > ${memoryFile}` })).isError, true);
 	const xargsRead = await extractorBash.execute("xargs-read", { command: "printf 'source.txt\\n' | xargs head -n 1" });
 	assert.notEqual(xargsRead.isError, true);
 	assert.match(xargsRead.content[0]?.type === "text" ? xargsRead.content[0].text : "", /project value/);
-	assert.equal(
-		(await extractorBash.execute("xargs-outside", { command: "printf 'inside.md\\n' | xargs head -n 1 /etc/hosts" }))
-			.isError,
+	assert.notEqual(
+		(await extractorBash.execute("xargs-outside", { command: `printf '' | xargs head -n 1 ${outsideFile}` })).isError,
 		true,
 	);
 	assert.equal(await readFile(memoryFile, "utf8"), "memory value\n");
@@ -445,7 +447,7 @@ test("restricted Bash rejects command remapping before executing it", async (t) 
 	}
 });
 
-test("symlinks cannot escape and Bash rm keeps the ordinary read baseline", async (t) => {
+test("reads can follow symlinks while writes stay contained and rm needs no read baseline", async (t) => {
 	const { root, memoryDir, projectRoot, locksDir } = await createToolWorkspace(t, "pi-memory-native-delete-");
 	const outside = join(root, "outside.md");
 	const linked = join(memoryDir, "linked.md");
@@ -462,18 +464,17 @@ test("symlinks cannot escape and Bash rm keeps the ordinary read baseline", asyn
 			touchedPaths: new Set(),
 		}),
 	);
-	assert.equal((await tools.get("read")!.execute("linked", { path: linked })).isError, true);
+	assert.notEqual((await tools.get("read")!.execute("linked", { path: linked })).isError, true);
 	assert.equal((await tools.get("write")!.execute("linked-write", { path: linked, content: "x" })).isError, true);
 
 	const target = join(memoryDir, "delete.md");
 	await writeFile(target, "delete me\n");
 	const bash = tools.get("bash")!;
-	assert.equal((await bash.execute("unread", { command: `rm ${target}` })).isError, true);
+	assert.notEqual((await bash.execute("unread", { command: `rm --force ${target}` })).isError, true);
+	await writeFile(target, "read version\n");
 	await tools.get("read")!.execute("read", { path: target });
 	await writeFile(target, "changed\n");
-	assert.equal((await bash.execute("stale", { command: `rm -f -- ${target}` })).isError, true);
-	await tools.get("read")!.execute("read-again", { path: target });
-	assert.notEqual((await bash.execute("delete", { command: `rm -- ${target}` })).isError, true);
+	assert.notEqual((await bash.execute("stale", { command: `rm -f -- ${target}` })).isError, true);
 	await assert.rejects(readFile(target), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 
 	for (const protectedName of ["agents", ".git"]) {

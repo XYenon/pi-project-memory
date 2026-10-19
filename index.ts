@@ -32,7 +32,7 @@ import {
 	recalledMemoriesPrompt,
 	recalledMemoryBudgetContent,
 } from "./src/prompts.ts";
-import { hasUnsafeMemoryText, sanitizeMemoryText } from "./src/sanitize.ts";
+import { sanitizeMemoryText } from "./src/sanitize.ts";
 import {
 	acquireLock,
 	compareAndSwapLastDreamAt,
@@ -479,18 +479,6 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 			if (snapshot) state.readSnapshots.set(event.toolCallId, { path: relativePath, snapshot });
 			return;
 		}
-		if (event.toolName !== "write" && event.toolName !== "edit") return;
-		const filePath = memoryPathFromToolInput(paths.memoryDir, ctx.cwd, event.input);
-		if (!filePath) return;
-		if (state.activeExtraction || state.extractionPreparations.size > 0 || state.activeDream)
-			return { block: true, reason: "Background memory maintenance is writing this store; retry after it finishes" };
-		if (!(await safeMainMemoryTarget(paths.memoryDir, filePath)))
-			return { block: true, reason: "Memory write path cannot be verified inside the memory directory" };
-		if (unsafeMutationText(event.input))
-			return {
-				block: true,
-				reason: "Memory write contains reserved prompt tags, unsafe invisible characters, or confusable harness markup",
-			};
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
@@ -920,18 +908,6 @@ async function safeMainMemoryTarget(memoryDir: string, filePath: string): Promis
 	}
 }
 
-function unsafeMutationText(input: Record<string, unknown>): boolean {
-	const candidates: string[] = [];
-	if (typeof input.content === "string") candidates.push(input.content);
-	if (typeof input.new_string === "string") candidates.push(input.new_string);
-	if (Array.isArray(input.edits))
-		for (const edit of input.edits) {
-			if (edit && typeof edit === "object" && typeof (edit as { newText?: unknown }).newText === "string")
-				candidates.push((edit as { newText: string }).newText);
-		}
-	return candidates.some(hasUnsafeMemoryText);
-}
-
 function activeBranchEntries(ctx: ExtensionContext): ReturnType<ExtensionContext["sessionManager"]["getBranch"]> {
 	const branch = ctx.sessionManager.getBranch();
 	const compact = branch.findLastIndex((entry) => entry.type === "compaction");
@@ -1196,7 +1172,6 @@ async function scheduleExtraction(
 			codemode: state.getCodemode(),
 			config: identity.config,
 			paths,
-			excludedReadRoots: [ctx.sessionManager.getSessionDir()],
 			isCurrentGeneration: () => operationIsCurrent(state, ctx, identity),
 			onUsage: (usage) => addUsage(state.backgroundUsage.extractor, usage),
 			onTouched: (path, hash) => {

@@ -509,7 +509,6 @@ export async function runChildAgent(options: {
 	config: ProjectMemoryConfig;
 	paths: ProjectPaths;
 	sessionDir?: string;
-	excludedReadRoots?: string[];
 	isCurrentGeneration: () => boolean;
 	onUsage?: (usage: Usage) => void;
 	onTouched?: (relativePath: string, hash: string | null) => void | Promise<void>;
@@ -526,7 +525,6 @@ export async function runChildAgent(options: {
 		config,
 		paths,
 		sessionDir,
-		excludedReadRoots,
 		isCurrentGeneration,
 		onUsage,
 		onTouched,
@@ -547,7 +545,6 @@ export async function runChildAgent(options: {
 			projectRoot: paths.projectRoot,
 			cwd: ctx.cwd,
 			sessionDir,
-			excludedReadRoots,
 			scratchDir,
 			isCurrentGeneration,
 			isProjectTrusted: () => ctx.isProjectTrusted(),

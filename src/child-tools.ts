@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, copyFile, lstat, mkdir, readFile, realpath, rm, stat } from "node:fs/promises";
-import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
 	createBashTool,
@@ -15,16 +15,8 @@ import {
 	generateUnifiedPatch,
 } from "@earendil-works/pi-coding-agent";
 import fg from "fast-glob";
-import { runNativeSearch } from "./native-search.ts";
-import {
-	assertContainedMarkdown,
-	canonicalizeReadRoots,
-	isContainedPath,
-	resolveToolPath,
-	VCS_METADATA_DIRECTORIES,
-} from "./paths.ts";
+import { assertContainedMarkdown, isContainedPath, resolveToolPath, VCS_METADATA_DIRECTORIES } from "./paths.ts";
 import { prepareRestrictedBash } from "./restricted-bash.ts";
-import { sanitizePersistedMemoryText } from "./sanitize.ts";
 import { atomicWriteIfBaseline, lintMemoryContent, safeDeleteMemoryFile, sameBaseline, sha256 } from "./store.ts";
 import type { ReadBaseline } from "./types.ts";
 
@@ -37,8 +29,6 @@ interface ToolEnvironment {
 	projectRoot: string;
 	cwd: string;
 	sessionDir?: string;
-	/** Extractor passes exclude original sessions even when the project contains them. */
-	excludedReadRoots?: string[];
 	scratchDir?: string;
 	isCurrentGeneration: () => boolean;
 	isProjectTrusted?: () => boolean;
@@ -69,46 +59,8 @@ function toolError(name: string, error: unknown) {
 	};
 }
 
-function allowedReadRoots(env: ToolEnvironment): string[] {
-	return [
-		env.memoryDir,
-		env.projectRoot,
-		env.cwd,
-		...(env.mode === "dream" && env.sessionDir ? [env.sessionDir] : []),
-		...(env.scratchDir ? [env.scratchDir] : []),
-	];
-}
-
-async function canonicalReadRoots(env: ToolEnvironment): Promise<string[]> {
-	return Promise.all(allowedReadRoots(env).map((root) => realpath(root)));
-}
-
-function canonicalExcludedRoots(env: ToolEnvironment): Promise<string[]> {
-	return canonicalizeReadRoots(env.excludedReadRoots ?? []);
-}
-
-async function assertNotExcluded(env: ToolEnvironment, path: string): Promise<void> {
-	if ((await canonicalExcludedRoots(env)).some((root) => isContainedPath(root, path)))
-		throw new Error("Path is inside an excluded original session directory");
-}
-
-async function assertDirectoryRead(env: ToolEnvironment, directory: string): Promise<void> {
-	await assertNotExcluded(env, directory);
-	if ((await canonicalExcludedRoots(env)).some((root) => isContainedPath(directory, root)))
-		throw new Error("Directory-wide Bash reads cannot include an original session directory; use find or grep");
-}
-
 async function resolveReadablePath(env: ToolEnvironment, rawPath: string): Promise<string> {
-	const absolute = resolveToolPath(env.cwd, rawPath);
-	const [canonical, roots] = await Promise.all([realpath(absolute), canonicalReadRoots(env)]);
-	await assertNotExcluded(env, canonical);
-	const directlyAllowed =
-		allowedReadRoots(env).some((root) => isContainedPath(root, absolute)) ||
-		roots.some((root) => isContainedPath(root, canonical));
-	if (!directlyAllowed) throw new Error(`Read path is outside the allowed roots: ${rawPath}`);
-	if (!roots.some((root) => isContainedPath(root, canonical)))
-		throw new Error(`Read path resolves outside the allowed roots: ${rawPath}`);
-	return canonical;
+	return realpath(resolveToolPath(env.cwd, rawPath));
 }
 
 function decodeUtf8(buffer: Buffer): string {
@@ -169,7 +121,6 @@ async function resolveWritablePath(env: ToolEnvironment, rawPath: string, signal
 	const absolute = assertContainedMarkdown(env.memoryDir, resolveToolPath(env.cwd, rawPath));
 	const canonicalMemoryRoot = await realpath(env.memoryDir);
 	const expected = resolve(canonicalMemoryRoot, relative(resolve(env.memoryDir), absolute));
-	await assertNotExcluded(env, expected);
 	await ensureSafeParentDirectories(canonicalMemoryRoot, dirname(expected));
 	try {
 		const targetInfo = await lstat(expected);
@@ -247,35 +198,10 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 		await markTouched(env, filePath, written.hash);
 	}
 
-	async function search(
-		name: "find" | "grep",
-		params: Record<string, unknown> & { path?: string },
-		signal?: AbortSignal,
-	) {
-		assertChildRunAllowed(env, signal);
-		const path = await resolveReadablePath(env, params.path ?? env.cwd);
-		if (name === "find" && !(await stat(path)).isDirectory()) throw new Error("find path must be an allowed directory");
-		const result = await runNativeSearch(
-			name,
-			{ ...params, path },
-			{
-				cwd: env.cwd,
-				roots: await canonicalReadRoots(env),
-				excludedRoots: await canonicalExcludedRoots(env),
-			},
-			signal,
-		);
-		assertChildRunAllowed(env, signal);
-		return result;
-	}
-
 	const nativeRead = createReadTool(env.cwd, {
 		operations: {
 			access: async (path) => {
 				const canonical = await resolveReadablePath(env, path);
-				const extension = extname(canonical).toLowerCase();
-				if ([".pdf", ".ipynb"].includes(extension))
-					throw new Error(`${extension} files are not supported by the background read tool`);
 				await access(canonical, constants.R_OK);
 			},
 			readFile: async (path) => readFile(await resolveReadablePath(env, path)),
@@ -284,7 +210,6 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 	});
 	const read: typeof nativeRead = {
 		...nativeRead,
-		description: `${nativeRead.description} Access is limited to the approved memory, project, and session roots.`,
 		async execute(id, params, signal, onUpdate) {
 			try {
 				assertChildRunAllowed(env, signal);
@@ -317,10 +242,12 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 	const nativeFind = createFindTool(env.cwd);
 	const find: typeof nativeFind = {
 		...nativeFind,
-		description: `${nativeFind.description} The search root must be inside an approved read root.`,
-		async execute(_id, params, signal, _onUpdate) {
+		async execute(id, params, signal, onUpdate) {
 			try {
-				return await search("find", params, signal);
+				assertChildRunAllowed(env, signal);
+				const result = await nativeFind.execute(id, params, signal, onUpdate);
+				assertChildRunAllowed(env, signal);
+				return result;
 			} catch (error) {
 				return toolError("find", error);
 			}
@@ -330,11 +257,13 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 	const nativeGrep = createGrepTool(env.cwd);
 	const grep: typeof nativeGrep = {
 		...nativeGrep,
-		description: `${nativeGrep.description} The search target must be inside an approved read root.`,
-		async execute(_id, params, signal, _onUpdate) {
+		async execute(id, params, signal, onUpdate) {
 			const bounded = toolSignal(signal);
 			try {
-				return await search("grep", params, bounded.signal);
+				assertChildRunAllowed(env, bounded.signal);
+				const result = await nativeGrep.execute(id, params, bounded.signal, onUpdate);
+				assertChildRunAllowed(env, bounded.signal);
+				return result;
 			} catch (error) {
 				return toolError("grep", error);
 			} finally {
@@ -370,7 +299,7 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 						},
 					},
 				});
-				const content = sanitizePersistedMemoryText(params.content);
+				const content = params.content;
 				const nativeResult = await nativeWrite.execute(id, { path: filePath, content }, signal, onUpdate);
 				await commitMemory(filePath, expected, finalContent, signal);
 				const diff = generateDiffString(original ?? "", finalContent);
@@ -418,12 +347,8 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 						},
 					},
 				});
-				const sanitizedEdits = params.edits.map((item) => ({
-					oldText: item.oldText,
-					newText: sanitizePersistedMemoryText(item.newText),
-				}));
-				const nativeResult = await nativeEdit.execute(id, { path: filePath, edits: sanitizedEdits }, signal, onUpdate);
-				const finalContent = sanitizePersistedMemoryText(capturedEdit);
+				const nativeResult = await nativeEdit.execute(id, { path: filePath, edits: params.edits }, signal, onUpdate);
+				const finalContent = capturedEdit;
 				await commitMemory(filePath, snapshot.baseline, finalContent, signal);
 				const diff = generateDiffString(snapshot.content, finalContent);
 				const nativeText = nativeResult.content[0]?.type === "text" ? nativeResult.content[0].text : "File edited";
@@ -459,7 +384,7 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 	const bash: typeof nativeBashShape = {
 		...nativeBashShape,
 		description:
-			"Run validated read-only Bash commands. The only mutation allowed is rm or rm -f of previously-read Markdown files inside the memory directory.",
+			"Run validated read-only Bash commands. The only mutation allowed is rm, rm -f, or rm --force of Markdown files inside the memory directory.",
 		async execute(id, params, signal, onUpdate) {
 			try {
 				assertChildRunAllowed(env, signal);
@@ -471,15 +396,11 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 				const prepared = await prepareRestrictedBash(params.command, {
 					memoryDir: env.memoryDir,
 					cwd: env.cwd,
-					resolveReadablePath: (path) => resolveReadablePath(env, path),
-					assertDirectoryRead: (path) => assertDirectoryRead(env, path),
 				});
 				if (prepared.kind === "delete") {
 					for (const path of prepared.paths) {
 						const filePath = await resolveWritablePath(env, path, signal);
-						const expected = baselines.get(filePath);
-						if (!expected) throw new Error("Memory files require a prior ordinary text read before deletion");
-						await safeDeleteMemoryFile(env.memoryDir, filePath, expected, mutationLock(env, filePath), () =>
+						await safeDeleteMemoryFile(env.memoryDir, filePath, undefined, mutationLock(env, filePath), () =>
 							revalidateWritablePath(env, filePath, signal),
 						);
 						baselines.delete(filePath);
@@ -491,7 +412,6 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 					};
 				}
 				if (!env.scratchDir) throw new Error("Restricted Bash requires a private scratch directory");
-				await prepared.revalidate();
 				const nativeBash = createBashTool(prepared.cwd, prepared.options);
 				const result = await nativeBash.execute(
 					id,

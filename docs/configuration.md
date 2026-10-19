@@ -270,11 +270,9 @@ After the extension is enabled in a trusted project, it uses the following file 
 └── *.md                                     # Topic memory files
 
 <os.tmpdir()>/                               # Operating system temporary directory (created as needed during runs and deleted automatically afterward)
-├── pi-project-memory-<random>/              # Private scratchDir for one extractor or dream run
-│   ├── bash-<uuid>.log                      # Full output file that restricted Bash saves when output exceeds the inline length
-│   └── codemode-<uuid>.txt                  # Full output file that background codemode saves when output exceeds the inline length
-└── pi-project-memory-search-<random>/       # Temporary isolation directory for one background find or grep subprocess run
-    └── bin/                                 # rg and fd wrapper scripts that inject boundary exclusion rules
+└── pi-project-memory-<random>/              # Private scratchDir for one extractor or dream run
+    ├── bash-<uuid>.log                      # Full output file that restricted Bash saves when output exceeds the inline length
+    └── codemode-<uuid>.txt                  # Full output file that background codemode saves when output exceeds the inline length
 ```
 
 ### 2. Project ownership, `<project-key>` computation, and collision handling
@@ -341,7 +339,6 @@ The extension **does not store** conversation transcripts. Instead, it uses `ctx
 
 - **Temporary resources that are cleaned up automatically**:
   - Each background extractor or dream run creates `<tmpdir>/pi-project-memory-<random>/`. It contains the controlled command directory and any overflow tool output logs. The directory is deleted completely with `rm(..., { recursive: true, force: true })` in the `finally` block when that sub-task ends.
-  - Each background `find` or `grep` search creates `<tmpdir>/pi-project-memory-search-<random>/`. It is deleted recursively right after that search subprocess exits.
   - Normally released `.lock`, `.lock.recover`, and `.tmp` files are deleted as soon as the related operation ends.
 - **Files that persist (the extension never deletes them silently in the background)**:
   - `config.json`, `projects/<namespace>/`, `memory-roots/<memory-root-hash>/`, and the `.md` files under `memory/` stay on disk for a long time.

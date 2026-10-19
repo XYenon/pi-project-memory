@@ -10,7 +10,7 @@ import {
 	recalledMemoryBudgetContent,
 	SELECTOR_SYSTEM_PROMPT,
 } from "../src/prompts.ts";
-import { hasUnsafeMemoryText, sanitizeMemoryText, sanitizePersistedMemoryText } from "../src/sanitize.ts";
+import { hasUnsafeMemoryText, sanitizeMemoryText } from "../src/sanitize.ts";
 
 test("recall injection uses Claude-style headers, stale notices, and reserved-tag neutralization", () => {
 	const prompt = recalledMemoriesPrompt([
@@ -78,12 +78,11 @@ test("runtime prompts match the fixed Claude-derived fixtures after allowed subs
 test("sanitizer strips dangerous Unicode while preserving Claude's allowed joiners and variation selectors", () => {
 	const input = "a\r\nb\u0000c\u202Ed\uE000e\u200Cf\u200Dg\uFE0Eh\uFE0F";
 	assert.equal(sanitizeMemoryText(input), "a\nbcde\u200Cf\u200Dg\uFE0Eh\uFE0F");
-	assert.equal(sanitizePersistedMemoryText(input), "a\nbcde\u200Cf\u200Dg\uFE0Eh\uFE0F");
 	assert.equal(hasUnsafeMemoryText(input), true);
 	assert.equal(hasUnsafeMemoryText("a\r\nb"), false);
 });
 
-test("index and recall sanitization drops controls while persisted writes keep their separate sanitizer", () => {
+test("index and recall sanitization drops controls", () => {
 	const index = indexPrompt("a\u0000b\u009fc", "/memory");
 	const recall = recalledMemoriesPrompt([
 		{
@@ -100,7 +99,6 @@ test("index and recall sanitization drops controls while persisted writes keep t
 		assert.equal(index.includes(unsafe), false);
 		assert.equal(recall.includes(unsafe), false);
 	}
-	assert.equal(sanitizePersistedMemoryText("a\u0000b\u009fc"), "abc");
 });
 
 test("sanitizer neutralizes Unicode and confusable harness tags", () => {

@@ -958,7 +958,7 @@ export function topicCatalog(topics: MemoryTopic[]): string {
 export async function safeDeleteMemoryFile(
 	memoryDir: string,
 	filePath: string,
-	expected: ReadBaseline,
+	expected: ReadBaseline | undefined,
 	lockFile?: string,
 	guard?: () => void | Promise<void>,
 ): Promise<void> {
@@ -970,7 +970,7 @@ export async function safeDeleteMemoryFile(
 	try {
 		await guard?.();
 		await withFileMutationQueue(canonicalFile, async () => {
-			if (!sameBaseline(await baseline(canonicalFile), expected))
+			if (expected && !sameBaseline(await baseline(canonicalFile), expected))
 				throw new Error(`File changed since it was read: ${canonicalFile}. Read it again before deleting.`);
 			await guard?.();
 			await rm(canonicalFile);

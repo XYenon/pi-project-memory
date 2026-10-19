@@ -33,7 +33,7 @@ Pi Project Memory 以 Claude Code 2.1.296 的本地私有文件模式（local pr
 - **单文件取回窗口**：每个被选中的 topic 文件最多读取前 200 行和 4,096 UTF-8 字节（先达到者生效）。读取按完整 UTF-8 行累加，当下一行超出 4,096 字节时立即停止，绝不注入半行或截断的多字节字符。
 - **异步预取与延迟注入**：Selector 在 Pi 接受最终用户文本后异步启动。普通请求在 `before_agent_start` 启动，排队或流式用户消息在实际进入主会话（`message_end`）时启动，原始 `input` 事件不发起模型请求。普通请求开始前最多等待预取 2 秒；超过 2 秒才完成的结果会通过 Pi 的 `steer` 消息加入下一次模型调用。此外，普通请求会标记下一条用户消息已预取，当 Pi 紧接着追加图片尺寸归一化后的用户消息时不会重复调用 selector，而后续独立的排队消息仍会正常触发各自的 selector。
 - **会话分支预算与已读抑制**：每个会话分支最多累计自动取回 61,440 个 UTF-16 代码单元。预算只统计净化后的 topic 正文以及文件被截断时实际附加的截断说明，不统计 `<system-reminder>` 包装、文件路径标题、过期提示和首条引导语。达到上限后停止调用 selector。当主 Agent 通过普通 `read` 工具完整读取某个 topic 文件后，该文件在当前分支不再自动取回；局部读取（`offset > 1` 或发生自动截断）不会触发抑制，且文件在磁盘上被修改后可重新进入候选。
-- **文本净化**：索引注入、取回注入与持久化写入都会移除危险控制字符、格式字符与不可见字符，并将保留的提示词标签（如 `<system-reminder>`、`<tool_use>` 等及其 Unicode 同形异义变体）转义为 `&lt;`，且不会引入替换字符 `U+FFFD`。
+- **文本净化**：索引注入与取回注入都会移除危险控制字符、格式字符与不可见字符，并将保留的提示词标签（如 `<system-reminder>`、`<tool_use>` 等及其 Unicode 同形异义变体）转义为 `&lt;`，且不会引入替换字符 `U+FFFD`。普通写入与编辑不执行落盘清理，也不因这些字符而阻断。
 
 ### 4. Selector 目录格式与输出 Schema
 
@@ -99,7 +99,7 @@ Selector 默认最大输出为 512 token，单次最多返回 5 个文件名（�
 
 ### 2. 后台工具接口与 Codemode 适配
 
-后台子 Agent 不仿造 Claude Code 的文件工具名称与参数结构，而是直接包装并复用 Pi 原生的六个工具工厂：`read`、`find`、`grep`、`write`、`edit` 和 `bash`。因此，`read` 的分页窗口、`find` / `grep` 的参数格式以及 `edit` 的 `edits[]` 数组结构均以 Pi 为准；不提供 Claude 的 `Glob` 工具、`Grep` 的 `output_mode`、`Read` 的 PDF `pages` / `allow_large` 参数，也不支持读取 PDF 或 Jupyter Notebook。
+后台子 Agent 不仿造 Claude Code 的文件工具名称与参数结构，而是直接包装并复用 Pi 原生的六个工具工厂：`read`、`find`、`grep`、`write`、`edit` 和 `bash`。因此，`read` 的分页窗口、`find` / `grep` 的参数格式以及 `edit` 的 `edits[]` 数组结构均以 Pi 为准；不提供 Claude 的 `Glob` 工具、`Grep` 的 `output_mode`、`Read` 的 PDF `pages` / `allow_large` 参数，不额外实现 PDF 或 Jupyter Notebook 解析，文件读取沿用 Pi 原生行为。
 
 Bash 按 Claude 记忆权限路径中观察到的执行顺序工作：先进行静态权限和只读检查，再交给宿主通用 Shell 工具。Pi Project Memory 将原始命令传给 Pi 原生 Bash 工具，由宿主程序执行 grep 和 xargs；不复刻 Claude 可选的沙箱包装。标准输入展开后的动态路径不做运行时检查。
 

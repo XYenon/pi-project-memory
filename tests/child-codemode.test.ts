@@ -46,8 +46,9 @@ for (const role of ["extractor", "dream"] as const) {
 				if (JSON.stringify(names) !== JSON.stringify(["bash", "edit", "find", "grep", "read", "write"])) throw Error("Unexpected tools");
 				if (typeof models !== "undefined") throw Error("Model access leaked");
 				if (load("secret") !== undefined) throw Error("Store leaked");
+				await tools.read({path: ${JSON.stringify(outside)}});
 				const denied = await Promise.allSettled([
-					tools.read({path: ${JSON.stringify(outside)}}),
+					tools.write({path: ${JSON.stringify(outside)}, content: "bad"}),
 					tools.edit({path: ${JSON.stringify(topic)}, edits: [{oldText: "old", newText: "bad"}]}),
 					tools.bash({command: "touch forbidden"})
 				]);
