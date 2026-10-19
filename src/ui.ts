@@ -15,6 +15,24 @@ import type { MemoryRole, MemoryTopic } from "./types.ts";
 
 export type MemoryPanelTab = "overview" | "topics" | "models";
 export type MemoryPanelAction = "extract" | "dream" | "reload-config" | "refresh";
+export type MemoryPanelRunner = (
+	action: MemoryPanelAction,
+	notify: (message: string, level: "info" | "warning" | "error") => void,
+) => Promise<MemoryPanelData>;
+
+const ACTION_PROGRESS: Record<MemoryPanelAction, string> = {
+	extract: "Extracting",
+	dream: "Dreaming",
+	"reload-config": "Reloading configuration",
+	refresh: "Refreshing",
+};
+const ACTION_COMPLETE: Record<MemoryPanelAction, string> = {
+	extract: "Extraction complete.",
+	dream: "Dream complete.",
+	"reload-config": "Configuration reloaded.",
+	refresh: "Panel refreshed.",
+};
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 export interface MemoryModelView {
 	role: MemoryRole;
@@ -84,16 +102,21 @@ export class MemoryPanel {
 	private readonly scroll: ScrollView;
 	private scrollLines: string[] = [];
 	private bodyHeight = 12;
+	private runningAction?: MemoryPanelAction;
+	private actionStatus?: { message: string; level: "info" | "warning" | "error" };
+	private actionTimer?: ReturnType<typeof setInterval>;
+	private spinnerFrame = 0;
 
 	constructor(
-		private readonly data: MemoryPanelData,
+		private data: MemoryPanelData,
 		private readonly theme: Theme,
 		private readonly keys: KeybindingsManager,
 		private readonly requestRender: () => void,
 		private readonly terminalRows: () => number,
-		private readonly done: (action: MemoryPanelAction | undefined) => void,
+		private readonly done: (action: undefined) => void,
 		private readonly readTopic: (topic: MemoryTopic) => Promise<string>,
 		initialTab: MemoryPanelTab = "overview",
+		private readonly runAction: MemoryPanelRunner = async () => data,
 	) {
 		this.tab = initialTab;
 		this.scroll = new ScrollView(
@@ -122,7 +145,43 @@ export class MemoryPanel {
 
 	dispose(): void {
 		this.disposed = true;
+		clearInterval(this.actionTimer);
 		this.request++;
+	}
+
+	private async executeAction(action: MemoryPanelAction): Promise<void> {
+		if (this.disposed || this.runningAction) return;
+		this.runningAction = action;
+		this.actionStatus = undefined;
+		this.spinnerFrame = 0;
+		this.actionTimer = setInterval(() => {
+			this.spinnerFrame = (this.spinnerFrame + 1) % SPINNER_FRAMES.length;
+			this.requestRender();
+		}, 80);
+		this.requestRender();
+		try {
+			const data = await this.runAction(action, (message, level) => {
+				if (this.disposed) return;
+				if (this.actionStatus?.level !== "error" && (this.actionStatus?.level !== "warning" || level !== "info"))
+					this.actionStatus = { message, level };
+				this.requestRender();
+			});
+			if (!this.disposed) {
+				this.data = data;
+				this.actionStatus ??= {
+					message: ACTION_COMPLETE[action],
+					level: "info",
+				};
+			}
+		} catch (error) {
+			if (!this.disposed)
+				this.actionStatus = { message: error instanceof Error ? error.message : String(error), level: "error" };
+		} finally {
+			clearInterval(this.actionTimer);
+			this.actionTimer = undefined;
+			this.runningAction = undefined;
+			if (!this.disposed) this.requestRender();
+		}
 	}
 
 	private actions(): SelectItem[] {
@@ -136,7 +195,15 @@ export class MemoryPanel {
 				: []),
 			{ value: "reload-config", label: "Reload configuration", description: "Apply changes from config.json" },
 			{ value: "refresh", label: "Refresh panel", description: "Update status and files" },
-		];
+		].map((item) =>
+			item.value === this.runningAction
+				? {
+						...item,
+						label: `${SPINNER_FRAMES[this.spinnerFrame]} ${ACTION_PROGRESS[this.runningAction]}…`,
+						description: "",
+					}
+				: item,
+		);
 	}
 
 	private renderList(items: SelectItem[], height: number, width: number): string[] {
@@ -144,7 +211,12 @@ export class MemoryPanel {
 			!this.list ||
 			this.listHeight !== height ||
 			items.length !== this.listItems.length ||
-			items.some((item, i) => item.value !== this.listItems[i]?.value)
+			items.some(
+				(item, i) =>
+					item.value !== this.listItems[i]?.value ||
+					item.label !== this.listItems[i]?.label ||
+					item.description !== this.listItems[i]?.description,
+			)
 		) {
 			const selected = this.list?.getSelectedItem()?.value;
 			this.list = new SelectList(items, Math.max(1, height - 1), {
@@ -165,7 +237,7 @@ export class MemoryPanel {
 					const topic = this.data.topics.find((topic) => topic.filename === item.value);
 					if (topic) void this.openTopic(topic);
 				} else if (item.value === "topics") this.changeTab("topics");
-				else this.done(item.value as MemoryPanelAction);
+				else void this.executeAction(item.value as MemoryPanelAction);
 			};
 			this.listItems = items;
 			this.listHeight = height;
@@ -250,7 +322,7 @@ export class MemoryPanel {
 				model.maxTokens === "inherit" ? "Provider default" : `${model.maxTokens.toLocaleString("en-US")} tokens`,
 			);
 			if (model.outputMode) field("Output mode", model.outputMode);
-			field("Activity", model.activity);
+			field("Activity", this.runningAction === model.role.replace("extractor", "extract") ? "Running" : model.activity);
 			if (model.availabilityError) field("Unavailable", model.availabilityError, true);
 			if (model.lastError) field("Last error", model.lastError, true);
 			lines.push("");
@@ -272,7 +344,14 @@ export class MemoryPanel {
 
 	render(width: number): string[] {
 		const innerWidth = Math.max(1, width - 2);
-		this.bodyHeight = Math.max(4, Math.min(24, this.terminalRows() - 9));
+		const result =
+			!this.runningAction && this.actionStatus
+				? this.theme.fg(
+						this.actionStatus.level === "info" ? "success" : "warning",
+						singleLine(this.actionStatus.message),
+					)
+				: undefined;
+		this.bodyHeight = Math.max(4, Math.min(24, this.terminalRows() - 9 - (result ? 1 : 0)));
 		const muted = (text: string) => this.theme.fg("muted", text);
 		const enabled = this.data.enabled ? this.theme.fg("success", "Enabled") : this.theme.fg("warning", "Disabled");
 		const header = [
@@ -333,8 +412,11 @@ export class MemoryPanel {
 			];
 			hint = "↑↓ choose · Enter run · Tab switch · Esc close";
 		}
-		const content = [...header, ...body.slice(0, this.bodyHeight)];
-		while (content.length < header.length + this.bodyHeight) content.push("");
+		const scrollInfo = this.preview || this.tab === "models" ? body.pop() : undefined;
+		const content = [...header, ...body.slice(0, this.bodyHeight - (scrollInfo ? 1 : 0))];
+		while (content.length < header.length + this.bodyHeight - (scrollInfo ? 1 : 0)) content.push("");
+		if (result) content.push(result);
+		if (scrollInfo) content.push(scrollInfo);
 		content.push(this.theme.fg("dim", hint), this.theme.fg("border", "─".repeat(innerWidth)));
 		return content.map((line) => truncateToWidth(` ${line}`, Math.max(1, width), "…"));
 	}
@@ -378,8 +460,9 @@ export async function openMemoryPanel(
 	data: MemoryPanelData,
 	readTopic: (topic: MemoryTopic) => Promise<string>,
 	tab: MemoryPanelTab = "overview",
-): Promise<MemoryPanelAction | undefined> {
-	return ctx.ui.custom<MemoryPanelAction | undefined>(
+	runAction?: MemoryPanelRunner,
+): Promise<undefined> {
+	return ctx.ui.custom<undefined>(
 		(tui, theme, keys, done) =>
 			new MemoryPanel(
 				data,
@@ -390,6 +473,7 @@ export async function openMemoryPanel(
 				done,
 				readTopic,
 				tab,
+				runAction,
 			),
 	);
 }

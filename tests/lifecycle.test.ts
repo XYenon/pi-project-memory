@@ -12,10 +12,17 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	type KeybindingsManager as ExtensionKeybindingsManager,
+	type MessageRenderer,
 	SessionManager,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, KeybindingsManager, type TUI, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	type EditorComponent,
+	KeybindingsManager,
+	type TUI,
+	TUI_KEYBINDINGS,
+} from "@earendil-works/pi-tui";
 import projectMemoryExtension from "../index.ts";
 import { resolveProjectPaths } from "../src/paths.ts";
 import { mainMemoryPrompt } from "../src/prompts.ts";
@@ -28,6 +35,7 @@ function fakeExtensionApi() {
 	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => unknown }>();
 	const sentMessages: Array<{ message: any; options: any }> = [];
+	const renderers = new Map<string, MessageRenderer>();
 	const api = {
 		on(event: string, handler: Handler) {
 			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
@@ -35,6 +43,9 @@ function fakeExtensionApi() {
 		},
 		registerCommand(name: string, command: { handler: (args: string, ctx: ExtensionContext) => unknown }) {
 			commands.set(name, command);
+		},
+		registerMessageRenderer(name: string, renderer: MessageRenderer) {
+			renderers.set(name, renderer);
 		},
 		getActiveTools: () => [],
 		getSettings: () => ({}),
@@ -47,6 +58,7 @@ function fakeExtensionApi() {
 		api,
 		commands,
 		sentMessages,
+		renderers,
 		async emit(event: string, value: unknown, ctx: ExtensionContext) {
 			if (event === "before_agent_start") value = { messageType: "user", ...(value as object) };
 			let result: unknown;
@@ -109,6 +121,15 @@ async function createLifecycleHarness(
 	const faux = createFauxCore({ models: [{ id: "lifecycle-model", reasoning: false }] });
 	const notices: Array<{ message: string; level: string }> = [];
 	const statusUpdates: Array<{ key: string; text: string | undefined }> = [];
+	const editorSnapshots: string[] = [];
+	let editorFactory: ReturnType<ExtensionContext["ui"]["getEditorComponent"]>;
+	let editor: EditorComponent | undefined;
+	const tui = {
+		terminal: { rows: 32 },
+		requestRender: () => {
+			if (editor) editorSnapshots.push(editor.render(100).join("\n"));
+		},
+	} as unknown as TUI;
 	const projection =
 		options.projection ??
 		({
@@ -134,6 +155,24 @@ async function createLifecycleHarness(
 		ui: {
 			notify: (message: string, level: string) => notices.push({ message, level }),
 			setStatus: (key: string, text: string | undefined) => statusUpdates.push({ key, text }),
+			getEditorComponent: () => editorFactory,
+			setEditorComponent: (factory: typeof editorFactory) => {
+				editorFactory = factory;
+				editor = factory?.(
+					tui,
+					{
+						borderColor: (text) => text,
+						selectList: {
+							selectedPrefix: (text: string) => text,
+							selectedText: (text: string) => text,
+							description: (text: string) => text,
+							scrollInfo: (text: string) => text,
+							noMatch: (text: string) => text,
+						},
+					},
+					new KeybindingsManager(TUI_KEYBINDINGS) as ExtensionKeybindingsManager,
+				);
+			},
 		},
 		sessionManager: {
 			getBranch: () => options.branch ?? [],
@@ -158,6 +197,7 @@ async function createLifecycleHarness(
 		faux,
 		notices,
 		statusUpdates,
+		editorSnapshots,
 		projection,
 		context,
 		extension,
@@ -174,11 +214,22 @@ function mockMemoryPanel(context: ExtensionContext, interact: (component: Compon
 		new Promise((resolve, reject) => {
 			const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Theme;
 			const tui = { terminal: { rows: 32 }, requestRender() {} } as unknown as TUI;
+			let active: (Component & { dispose?(): void }) | undefined;
+			const close: typeof resolve = (value) => {
+				active?.dispose?.();
+				resolve(value);
+			};
 			void Promise.resolve(
-				factory(tui, theme, new KeybindingsManager(TUI_KEYBINDINGS) as ExtensionKeybindingsManager, resolve),
+				factory(tui, theme, new KeybindingsManager(TUI_KEYBINDINGS) as ExtensionKeybindingsManager, close),
 			)
-				.then(interact)
-				.catch(reject);
+				.then(async (component) => {
+					active = component;
+					await interact(component);
+				})
+				.catch((error) => {
+					active?.dispose?.();
+					reject(error);
+				});
 		});
 }
 
@@ -218,19 +269,75 @@ test("memory panel previews local files without charging recall or injecting con
 test("memory panel refreshes disabled configuration without initializing memory paths", async (t) => {
 	const h = await createLifecycleHarness(t, { config: { enabled: false } });
 	let screens = 0;
-	mockMemoryPanel(h.context, (component) => {
+	mockMemoryPanel(h.context, async (component) => {
+		screens++;
 		const screen = component.render(100).join("\n");
 		assert.match(screen, /Disabled/);
 		assert.doesNotMatch(screen, /Extract\s+Save durable facts|Dream\s+Merge duplicates/);
-		if (screens++ === 0) {
-			component.handleInput?.("\u001b[B");
-			component.handleInput?.("\r");
-		} else component.handleInput?.("\u001b");
+		component.handleInput?.("\u001b[B");
+		component.handleInput?.("\r");
+		assert.match(component.render(100).join("\n"), /Reloading configuration/);
+		await eventually(
+			() => component.render(100).join("\n").includes("Reloaded"),
+			"reload should complete inside the same panel",
+		);
+		component.handleInput?.("\u001b");
 	});
 	await h.extension.commands.get("memory")?.handler("", h.context);
-	assert.equal(screens, 2);
-	assert.match(h.notices.at(-1)?.message ?? "", /Reloaded/);
+	assert.equal(screens, 1);
+	assert.equal(h.notices.length, 0);
 	await assert.rejects(access(h.paths.memoryDir));
+});
+
+test("manual maintenance stays in one panel and reports completion there", async (t) => {
+	for (const action of ["extract", "dream"] as const) {
+		const h = await createLifecycleHarness(t, {
+			config: { extraction: { idleFlushSeconds: 0 }, dream: { enabled: true } },
+		});
+		const release = deferred();
+		t.after(() => release.resolve());
+		let started = false;
+		let screens = 0;
+		h.faux.setResponses([
+			async () => {
+				started = true;
+				await release.promise;
+				return fauxAssistantMessage("No changes needed.");
+			},
+		]);
+		mockMemoryPanel(h.context, async (component) => {
+			screens++;
+			component.render(100);
+			component.handleInput?.("\u001b[B");
+			if (action === "dream") component.handleInput?.("\u001b[B");
+			component.handleInput?.("\r");
+			await eventually(() => started, "panel action should start without closing the screen");
+			assert.match(component.render(100).join("\n"), action === "extract" ? /Extracting/ : /Dreaming/);
+			assert.equal(h.context.ui.getEditorComponent(), undefined, "progress must not replace the open panel's editor");
+			component.handleInput?.("\t");
+			component.handleInput?.("\t");
+			assert.match(component.render(100).join("\n"), /\[Models\]/);
+			if (action === "dream") {
+				for (let line = 0; line < 8; line++) component.handleInput?.("\u001b[B");
+			}
+			assert.match(component.render(100).join("\n"), /Activity\s+Running/);
+			release.resolve();
+			await eventually(
+				() =>
+					component
+						.render(100)
+						.join("\n")
+						.toLowerCase()
+						.includes(action === "extract" ? "extraction complete" : "dream complete"),
+				"completion should appear in the same panel",
+			);
+			assert.match(component.render(100).join("\n"), /\[Models\]/);
+			component.handleInput?.("\u001b");
+		});
+		await h.extension.commands.get("memory")?.handler("", h.context);
+		assert.equal(screens, 1);
+		assert.equal(h.notices.length, 0, "panel action results must not go into chat notifications");
+	}
 });
 
 test("memory list previews reject files replaced by links outside memory", async (t) => {
@@ -276,8 +383,9 @@ test("manual extraction reports task progress and completion even without change
 	h.context.mode = "tui";
 	h.faux.setResponses([fauxAssistantMessage("No new memory.")]);
 	await h.extension.commands.get("memory")?.handler("extract", h.context);
-	assert.ok(h.statusUpdates.some((update) => update.text === "Memory: Extracting"));
-	assert.equal(h.statusUpdates.at(-1)?.text, undefined);
+	assert.ok(h.editorSnapshots.some((screen) => screen.includes("Memory: Extracting")));
+	assert.doesNotMatch(h.editorSnapshots.at(-1) ?? "", /Memory:/);
+	assert.equal(h.statusUpdates.length, 0, "memory must not add a footer status row");
 	assert.match(h.notices.at(-1)?.message ?? "", /Extraction complete.*No memory changes/);
 });
 
@@ -818,6 +926,8 @@ test("recall prefetch waits two seconds, then delivers a late Pi steering messag
 	await eventually(() => harness.extension.sentMessages.length === 1, "late recall was not delivered");
 	const sent = harness.extension.sentMessages[0]!;
 	assert.equal(sent.message.customType, "pi-project-memory-recall");
+	assert.equal(sent.message.display, true);
+	assert.ok(harness.extension.renderers.has(sent.message.customType));
 	assert.match(sent.message.content, /late fact/);
 	assert.deepEqual(sent.options, { deliverAs: "steer" });
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1050,7 +1160,8 @@ test("reload invalidates an active maintenance child", async (t) => {
 	await harness.extension.commands.get("memory")?.handler("reload-config", harness.context);
 	await extraction;
 	assert.equal(childAborted, true);
-	assert.equal(harness.statusUpdates.at(-1)?.text, undefined, "reload must clear the cancelled task status");
+	assert.doesNotMatch(harness.editorSnapshots.at(-1) ?? "", /Memory:/, "reload must clear the cancelled task status");
+	assert.equal(harness.statusUpdates.length, 0);
 
 	await writeFile(harness.configFile, "{");
 	await harness.extension.commands.get("memory")?.handler("reload-config", harness.context);
@@ -1498,11 +1609,19 @@ test("background updates report changed files and stale loaded memories", async 
 		const context = (await harness.extension.emit("context", { messages: [] }, harness.context)) as any;
 		assert.match(context.messages.at(-1).content, /Background memory extraction/);
 		assert.match(context.messages.at(-1).content, /loaded copy of loaded\.md is now stale/);
+		assert.equal(context.messages.at(-1).display, false, "request-local reminders must not create UI entries");
 	}
 
 	const start = { prompt: "", systemPromptOptions: { sections: {} as Record<string, string> } };
 	const result = (await harness.extension.emit("before_agent_start", start, harness.context)) as any;
 	assert.equal(result.message.customType, "pi-project-memory-update");
+	assert.equal(result.message.display, true);
+	assert.deepEqual(result.message.details.updates[0], {
+		source: "extract",
+		summary: "saved 1 topic memory",
+		paths: ["loaded.md"],
+	});
+	assert.deepEqual(result.message.details.stalePaths, ["loaded.md"]);
 	assert.deepEqual(result.message.details.updatedPaths, ["loaded.md"]);
 	assert.match(result.message.content, /Background memory extraction/);
 	assert.match(result.message.content, /Files changed: loaded\.md/);
@@ -1515,6 +1634,16 @@ test("background updates report changed files and stale loaded memories", async 
 		harness.context,
 	)) as any;
 	assert.match(repeated.message.content, /loaded copy of loaded\.md is now stale relative to disk/);
+	assert.equal(repeated.message.display, false, "unchanged stale reminders remain in context without another UI entry");
+
+	await writeFile(topicPath, `${updated}another external change\n`);
+	const changedAgain = (await harness.extension.emit(
+		"before_agent_start",
+		{ prompt: "", systemPromptOptions: { sections: {} } },
+		harness.context,
+	)) as any;
+	assert.equal(changedAgain.message.display, true, "another edit of the same stale file must be visible");
+	assert.equal(changedAgain.message.details.updates[0].source, "external");
 });
 
 test("extraction requires three words in one user string or text block and consumes skipped ranges", async (t) => {

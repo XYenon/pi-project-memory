@@ -9,14 +9,25 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { MemoryTopic } from "../src/types.ts";
-import { filterMemoryTopics, MemoryPanel, type MemoryPanelAction, type MemoryPanelData } from "../src/ui.ts";
+import {
+	filterMemoryTopics,
+	MemoryPanel,
+	type MemoryPanelAction,
+	type MemoryPanelData,
+	type MemoryPanelRunner,
+} from "../src/ui.ts";
 
 function topic(filename: string, type: MemoryTopic["type"], description: string): MemoryTopic {
 	return { filename, type, description, filePath: `/memory/${filename}`, mtimeMs: 1, modifiedMs: 1, sizeBytes: 100 };
 }
 
 function panelHarness(
-	options: { topics?: MemoryTopic[]; enabled?: boolean; read?: (topic: MemoryTopic) => Promise<string> } = {},
+	options: {
+		topics?: MemoryTopic[];
+		enabled?: boolean;
+		read?: (topic: MemoryTopic) => Promise<string>;
+		run?: MemoryPanelRunner;
+	} = {},
 ) {
 	const colors = Object.fromEntries(
 		["accent", "border", "success", "warning", "muted", "dim", "text", "thinkingXhigh", "selectedBg"].map((color) => [
@@ -61,6 +72,11 @@ function panelHarness(
 		() => rows,
 		(action) => actions.push(action),
 		options.read ?? (async () => Array.from({ length: 100 }, (_, i) => `Memory line ${i}`).join("\n")),
+		"overview",
+		async (action, notify) => {
+			actions.push(action);
+			return options.run ? options.run(action, notify) : data;
+		},
 	);
 	panel.focused = true;
 	const render = (width = 100) => panel.render(width).map(stripTerminalSequences).join("\n");
@@ -268,4 +284,97 @@ test("Models wraps long values under their field and labels availability errors 
 	const narrow = h.render(40);
 	assert.match(narrow, /\n Model\n {3}provider\//);
 	for (const line of h.panel.render(40)) assert.ok(visibleWidth(line) <= 40);
+});
+
+test("panel actions keep the screen open, animate, prevent duplicate runs and preserve navigation", async (t) => {
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	let finish!: (data: MemoryPanelData) => void;
+	const h = panelHarness({
+		run: () =>
+			new Promise((resolve) => {
+				finish = resolve;
+			}),
+	});
+	t.after(() => h.panel.dispose());
+	const idleLines = h.render().split("\n");
+	const actionRow = idleLines.findIndex((line) => /Extract\s+Save durable facts/.test(line));
+	h.panel.handleInput("\u001b[B");
+	h.panel.handleInput("\r");
+	const activeLines = h.render().split("\n");
+	assert.equal(
+		activeLines.findIndex((line) => line.includes("⠋ Extracting")),
+		actionRow,
+	);
+	assert.equal(activeLines.length, idleLines.length);
+	assert.deepEqual(activeLines.slice(0, 6), idleLines.slice(0, 6), "progress must not add a header row");
+	h.panel.handleInput("\r");
+	assert.deepEqual(h.actions, ["extract"]);
+	t.mock.timers.tick(80);
+	assert.match(h.render(), /⠙ Extracting/);
+	h.panel.handleInput("\t");
+	h.render();
+	h.panel.handleInput("api");
+	assert.match(h.render(), /1 of 2 topics/);
+	finish({ ...h.data, topics: [...h.data.topics, topic("new.md", "project", "new fact")] });
+	await tick();
+	assert.match(h.render(), /\[Topics\]/);
+	assert.match(h.render(), /Search: api/);
+	assert.match(h.render(), /1 of 3 topics/);
+	assert.match(h.render(), /Extraction complete/);
+	assert.ok(
+		h.render().indexOf("Extraction complete") > h.render().indexOf("api.md"),
+		"results belong below the content",
+	);
+	assert.deepEqual(h.render().split("\n").slice(0, 4), idleLines.slice(0, 4));
+	assert.deepEqual(h.actions, ["extract"], "completion must not close the panel");
+	const renders = h.renders();
+	t.mock.timers.tick(800);
+	assert.equal(h.renders(), renders);
+});
+
+test("panel action errors remain visible and actions can be retried", async (t) => {
+	let attempts = 0;
+	const h = panelHarness({
+		run: async (_action, notify) => {
+			if (++attempts === 1) throw new Error("Provider unavailable");
+			notify("Missing model credentials", "warning");
+			notify("Task returned", "info");
+			return h.data;
+		},
+	});
+	t.after(() => h.panel.dispose());
+	h.render();
+	h.panel.handleInput("\u001b[B");
+	h.panel.handleInput("\r");
+	await tick();
+	assert.match(h.render(), /Provider unavailable/);
+	assert.ok(h.render().indexOf("Provider unavailable") > h.render().indexOf("Refresh panel"));
+	h.panel.handleInput("\r");
+	await tick();
+	assert.equal(attempts, 2);
+	assert.match(h.render(), /Missing model credentials/);
+	assert.doesNotMatch(h.render(), /Task returned/);
+	assert.deepEqual(h.actions, ["extract", "extract"]);
+});
+
+test("closing a panel stops animation and late action results do not redraw it", async (t) => {
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	let finish!: (data: MemoryPanelData) => void;
+	const h = panelHarness({
+		run: () =>
+			new Promise((resolve) => {
+				finish = resolve;
+			}),
+	});
+	h.render();
+	h.panel.handleInput("\u001b[B");
+	h.panel.handleInput("\r");
+	h.panel.handleInput("\u001b");
+	assert.deepEqual(h.actions, ["extract", undefined]);
+	h.panel.dispose();
+	const renders = h.renders();
+	t.mock.timers.tick(800);
+	finish(h.data);
+	await tick();
+	assert.equal(h.renders(), renders);
 });

@@ -10,6 +10,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ChildCodemodeOptions } from "./src/child-codemode.ts";
 import { configPath, loadConfig } from "./src/config.ts";
+import { renderMemoryMessage } from "./src/memory-message.ts";
+import { MemoryStatus } from "./src/memory-status.ts";
 import {
 	addUsage,
 	effectiveThinkingLevel,
@@ -111,11 +113,14 @@ interface RuntimeState {
 	recallBytes: number;
 	loadedMemoryPaths: Set<string>;
 	staleLoadedMemoryPaths: Set<string>;
+	lastDisplayedStalePaths: string;
 	selectorHistory: SelectorHistoryEntry[];
 	turnSnapshot: Map<string, MarkdownSnapshotEntry>;
 	memoryIndexPrompt?: string;
 	parentContext?: ParentMemoryContext;
 	idleTimer?: NodeJS.Timeout;
+	maintenanceStatus?: MemoryStatus;
+	panelOpen?: boolean;
 	activeExtraction?: Promise<ChildRunResult | null>;
 	extractionAbortController?: AbortController;
 	activeDream?: Promise<ChildRunResult | null>;
@@ -142,8 +147,11 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 	let runtime: RuntimeState | undefined;
 	let blockedByTrust = false;
 	const backgroundUsage = processBackgroundUsage();
+	pi.registerMessageRenderer(RECALL_MESSAGE, renderMemoryMessage);
+	pi.registerMessageRenderer(UPDATE_MESSAGE, renderMemoryMessage);
 
 	pi.on("session_start", async (_event, ctx) => {
+		runtime?.maintenanceStatus?.dispose();
 		runtime?.prefetch?.controller.abort();
 		blockedByTrust = !ctx.isProjectTrusted();
 		if (blockedByTrust) {
@@ -174,6 +182,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 			recallBytes: restoreRecallBytes(ctx),
 			loadedMemoryPaths: new Set(recalled.keys()),
 			staleLoadedMemoryPaths: new Set(),
+			lastDisplayedStalePaths: "",
 			selectorHistory: [],
 			turnSnapshot: paths ? await snapshotMarkdown(paths.memoryDir) : new Map(),
 			maintenancePasses: new Set(),
@@ -328,8 +337,10 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 		return {
 			customType: RECALL_MESSAGE,
 			content: [update.content, recalledMemoriesPrompt(recalls)].filter(Boolean).join("\n\n"),
-			display: false,
+			display: true,
 			details: {
+				updates: update.updates,
+				stalePaths: update.stalePaths,
 				recallChars: recalledChars,
 				files: recalls.map((recall) => recall.filename),
 				memories: recalls.map((recall) => ({
@@ -649,6 +660,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 				1_000,
 			);
 		}
+		state.maintenanceStatus?.dispose();
 		runtime = undefined;
 	});
 
@@ -760,12 +772,14 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const command = args.trim();
 			if (ctx.mode !== "tui" || !["", "status", "list"].includes(command)) return runMemoryCommand(args, ctx);
-			while (runtime && ctx.isProjectTrusted()) {
-				const state = runtime;
-				const generation = state.generation;
+			if (!runtime || !ctx.isProjectTrusted()) return runMemoryCommand(args, ctx);
+			const state = runtime;
+			const loadPanelData = async (): Promise<MemoryPanelData> => {
+				if (runtime !== state || !ctx.isProjectTrusted())
+					throw new Error("Memory session changed. Close and reopen /memory.");
 				const paths = state.paths;
 				const topics = paths ? await scanTopics(paths.memoryDir) : [];
-				const data: MemoryPanelData = {
+				return {
 					project: paths?.projectRoot ?? ctx.cwd,
 					configFile: displayPath(configPath()),
 					enabled: state.config.enabled,
@@ -789,11 +803,18 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 					],
 					models: memoryModelViews(state, ctx),
 				};
-				const action = await openMemoryPanel(
+			};
+			const data = await loadPanelData();
+			state.panelOpen = true;
+			updateMaintenanceStatus(ctx, state);
+			try {
+				await openMemoryPanel(
 					ctx,
 					data,
 					async (topic) => {
-						if (!paths || runtime !== state || state.generation !== generation || !ctx.isProjectTrusted())
+						const paths = state.paths;
+						const generation = state.generation;
+						if (!paths || runtime !== state || !ctx.isProjectTrusted())
 							throw new Error("Memory session changed. Close and reopen /memory.");
 						assertContainedMarkdown(paths.memoryDir, topic.filePath);
 						if (!(await safeMainMemoryTarget(paths.memoryDir, topic.filePath)))
@@ -804,11 +825,29 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 						return `File: ${topic.filePath}\nType: ${topic.type}\n${topic.description}\n\n${item.content}${item.truncated ? "\n\nPreview limited to 200 lines or 4 KiB. Open the file directly for its full contents." : ""}`;
 					},
 					command === "list" ? "topics" : "overview",
+					async (action, notify) => {
+						if (runtime !== state || !ctx.isProjectTrusted())
+							throw new Error("Memory session changed. Close and reopen /memory.");
+						if (action !== "refresh") {
+							const panelContext = {
+								...ctx,
+								ui: {
+									...ctx.ui,
+									notify: (message: string, level: "info" | "warning" | "error" = "info") => {
+										if (state.panelOpen) notify(message, level);
+										else ctx.ui.notify(message, level);
+									},
+								},
+							};
+							await runMemoryCommand(action, panelContext);
+						}
+						return loadPanelData();
+					},
 				);
-				if (!action) return;
-				if (action !== "refresh") await runMemoryCommand(action, ctx);
+			} finally {
+				state.panelOpen = false;
+				if (runtime === state) updateMaintenanceStatus(ctx, state);
 			}
-			return runMemoryCommand(args, ctx);
 		},
 	});
 }
@@ -1424,12 +1463,25 @@ function queueMemoryUpdate(state: RuntimeState, source: PendingMemoryUpdate["sou
 	} else state.pendingMemoryUpdates.push({ source, summary, paths: unique });
 }
 
-function drainMemoryUpdates(state: RuntimeState, consume = true): { content: string; paths: string[] } {
-	if (state.pendingMemoryUpdates.length === 0 && state.staleLoadedMemoryPaths.size === 0)
-		return { content: "", paths: [] };
+interface MemoryUpdateMessage {
+	content: string;
+	paths: string[];
+	updates: PendingMemoryUpdate[];
+	stalePaths: string[];
+	display: boolean;
+}
+
+function drainMemoryUpdates(state: RuntimeState, consume = true): MemoryUpdateMessage {
+	if (state.pendingMemoryUpdates.length === 0 && state.staleLoadedMemoryPaths.size === 0) {
+		if (consume) state.lastDisplayedStalePaths = "";
+		return { content: "", paths: [], updates: [], stalePaths: [], display: false };
+	}
 	const updates = consume ? state.pendingMemoryUpdates.splice(0) : state.pendingMemoryUpdates;
 	const paths = [...new Set(updates.flatMap((update) => update.paths))].sort();
 	const stale = [...state.staleLoadedMemoryPaths].sort();
+	const staleKey = JSON.stringify(stale);
+	const display = consume && (updates.length > 0 || (stale.length > 0 && staleKey !== state.lastDisplayedStalePaths));
+	if (consume) state.lastDisplayedStalePaths = staleKey;
 	const labels: Record<PendingMemoryUpdate["source"], string> = {
 		extract: "Background memory extraction",
 		dream: "Background memory consolidation",
@@ -1445,17 +1497,20 @@ function drainMemoryUpdates(state: RuntimeState, consume = true): { content: str
 	return {
 		content: `<system-reminder source="project-memory-update">\n${lines.join("\n")}\n</system-reminder>`,
 		paths,
+		updates: structuredClone(updates),
+		stalePaths: stale,
+		display,
 	};
 }
 
-function updateMessage(update: { content: string; paths: string[] }) {
+function updateMessage(update: MemoryUpdateMessage) {
 	if (!update.content) return undefined;
 	return {
 		message: {
 			customType: UPDATE_MESSAGE,
 			content: update.content,
-			display: false,
-			details: { updatedPaths: update.paths },
+			display: update.display,
+			details: { updatedPaths: update.paths, updates: update.updates, stalePaths: update.stalePaths },
 		},
 	};
 }
@@ -1484,6 +1539,10 @@ function staleMemoryToolReminder(mtimeMs: number): string {
 
 function updateMaintenanceStatus(ctx: ExtensionContext, state: RuntimeState): void {
 	if (ctx.mode !== "tui") return;
+	if (state.panelOpen) {
+		state.maintenanceStatus?.setMessage(undefined);
+		return;
+	}
 	const tasks =
 		state.config.enabled && !state.shuttingDown && ctx.isProjectTrusted()
 			? [
@@ -1491,7 +1550,8 @@ function updateMaintenanceStatus(ctx: ExtensionContext, state: RuntimeState): vo
 					state.activeDream && !state.dreamAbortController?.signal.aborted ? "Dreaming" : "",
 				].filter(Boolean)
 			: [];
-	ctx.ui.setStatus("project-memory", tasks.length ? `Memory: ${tasks.join(" · ")}` : undefined);
+	if (tasks.length) state.maintenanceStatus ??= new MemoryStatus(ctx.ui);
+	state.maintenanceStatus?.setMessage(tasks.length ? `Memory: ${tasks.join(" · ")}` : undefined);
 }
 
 function memoryModelViews(state: RuntimeState, ctx: ExtensionContext): MemoryModelView[] {
