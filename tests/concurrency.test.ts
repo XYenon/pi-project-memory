@@ -137,7 +137,7 @@ test("cross-process dream timestamp CAS publishes exactly one replacement", asyn
 	assert.ok(state.lastDreamAt === 101 || state.lastDreamAt === 202);
 });
 
-test("cross-process read-before-write CAS allows only one competing edit", async (t) => {
+test("cross-process memory edits publish complete files without a lock-busy rejection", async (t) => {
 	const root = await createTempDirectory(t, "pi-memory-process-cas-");
 	const memoryDir = join(root, "memory");
 	const projectRoot = join(root, "project");
@@ -157,7 +157,7 @@ test("cross-process read-before-write CAS allows only one competing edit", async
 	assert.equal(firstResult.code, 0, firstResult.stderr);
 	assert.equal(secondResult.code, 0, secondResult.stderr);
 	const results = [firstResult.stdout, secondResult.stdout].map((text) => JSON.parse(text.trim().split("\n").at(-1)!));
-	assert.equal(results.filter((result) => result.isError === false).length, 1);
-	assert.equal(results.filter((result) => result.isError === true).length, 1);
+	assert.ok(results.some((result) => result.isError === false));
+	for (const result of results) assert.doesNotMatch(JSON.stringify(result), /Another memory writer/);
 	assert.match(await readFile(filePath, "utf8"), /^(?:first|second)\n$/);
 });

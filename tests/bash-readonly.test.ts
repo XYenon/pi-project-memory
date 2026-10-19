@@ -44,7 +44,6 @@ test("fails closed for unsafe shell syntax and commands", () => {
 		"cat <<EOF\n$HOME\nEOF",
 		"cat <<EOF\n$((1 + 1))\nEOF",
 		"cat ~/README.md",
-		"cd; cat .ssh/config",
 		"PATH=. cat README.md",
 		"PATH=/tmp; cat README.md",
 		"PATH=/tmp && cat README.md",
@@ -91,8 +90,9 @@ test("parses typed options and file-valued operands", () => {
 	allows("du -L .");
 	allows("grep -R needle .");
 	allows("rg -L needle .");
-	denies("rg --glob='/etc/*' needle .");
-	denies("rg --glob='../*' needle .");
+	allows("rg --glob='/etc/*' needle .");
+	allows("rg --glob='../*' needle .");
+	allows("rg needle");
 	for (const command of [
 		"grep -e /etc/*'conf' README.md",
 		"rg -e /etc/*'conf' README.md",
@@ -280,10 +280,57 @@ test("returns path intents for the execution policy", () => {
 	denies(`env -S 'cat \${HOME}/secret'`);
 	allows("env -S 'cat README.md'");
 	allows("cd sub && cat file.md");
-	denies("cd sub || cat file.md");
-	denies("cd sub; cat file.md");
-	denies("cd sub | cat file.md");
+	allows("cd sub || cat file.md");
+	allows("cd sub; cat file.md");
+	allows("cd sub | cat file.md");
 	const pidfile = classifyReadOnlyBash("pgrep --pidfile=run/server.pid node");
 	assert.equal(pidfile.readOnly, true);
 	assert.equal(pidfile.commands[0]?.pathIntents[0]?.value, "run/server.pid");
+});
+
+test("sed follows Claude printing and stdin substitution rules", () => {
+	for (const command of [
+		"printf old | sed 's/old/new/'",
+		"sed 's/error/warning/g'",
+		"sed -E 's/old/new/2g'",
+		"sed -n '1p;3p' file.txt",
+		"sed -n '1,10p; 20p' file.txt",
+	])
+		allows(command);
+	for (const command of [
+		"sed 's/old/new/' file.txt",
+		"sed 's/old/new/e'",
+		"sed 's/old/new/w output.txt'",
+		"sed 's/old/new/;e touch output.txt'",
+		"sed -i 's/old/new/' file.txt",
+		"sed -n '1p;w output.txt' file.txt",
+		"sed -n '1p;e touch output.txt' file.txt",
+	])
+		denies(command);
+});
+
+test("cd, man searches, and interface names match Claude argument checks", () => {
+	for (const command of [
+		"cd",
+		"cd; pwd",
+		"cd; cat .ssh/config",
+		"ifconfig eth0:1",
+		"ifconfig eth0.100",
+		"man -k 'foo/bar'",
+		"man -f 'foo~bar'",
+		"man --apropos 'foo/bar'",
+		"man --whatis 'foo/bar'",
+		"man -S 3 -k 'foo/bar'",
+	])
+		allows(command);
+	for (const command of [
+		"cd one two",
+		"ifconfig eth0 up",
+		"ifconfig 123",
+		"man 'foo/bar'",
+		"man -w 'foo/bar'",
+		"man -k -- -danger",
+		"man -ak 'foo/bar'",
+	])
+		denies(command);
 });

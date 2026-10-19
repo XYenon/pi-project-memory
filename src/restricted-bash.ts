@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
-import { classifyReadOnlyBash } from "./bash-readonly.ts";
+import { classifyReadOnlyBash, parseStaticBashCommand } from "./bash-readonly.ts";
 import { assertContainedMarkdown, VCS_METADATA_DIRECTORIES } from "./paths.ts";
 
 export interface RestrictedBashPolicy {
@@ -10,7 +10,7 @@ export interface RestrictedBashPolicy {
 }
 
 export type PreparedBash =
-	| { kind: "delete"; paths: string[] }
+	| { kind: "delete"; paths: string[]; force: boolean }
 	| {
 			kind: "execute";
 			cwd: string;
@@ -40,23 +40,21 @@ const PROTECTED_MEMORY_DIRECTORIES = new Set([
 	"skills",
 ]);
 
-function shellWords(value: string): string[] {
-	return value.match(/(?:'[^']*'|"(?:[^"\\]|\\.)*"|\S+)/g) ?? [];
-}
-
-function parseDelete(command: string, memoryDir: string): string[] | undefined {
-	const match = /^\s*rm(?:\s+(.*))?\s*$/.exec(command);
-	if (!match) return undefined;
+function parseDelete(command: string, memoryDir: string): { paths: string[]; force: boolean } | undefined {
+	const argv = parseStaticBashCommand(command);
+	if (argv?.[0] !== "rm") return undefined;
 	const paths: string[] = [];
 	let operands = false;
-	for (let raw of shellWords(match[1] ?? "")) {
-		if ((raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('"') && raw.endsWith('"')))
-			raw = raw.slice(1, -1);
+	let force = false;
+	for (const raw of argv.slice(1)) {
 		if (!operands && raw === "--") {
 			operands = true;
 			continue;
 		}
-		if (!operands && (raw === "-f" || raw === "--force")) continue;
+		if (!operands && (raw === "-f" || raw === "--force")) {
+			force = true;
+			continue;
+		}
 		if (!operands && raw.startsWith("-")) throw new Error("rm permits only -f or --force");
 		if (!raw.startsWith("/") || /[*?[]/.test(raw)) throw new Error("rm requires absolute, non-glob Markdown paths");
 		const path = assertContainedMarkdown(memoryDir, raw);
@@ -69,13 +67,13 @@ function parseDelete(command: string, memoryDir: string): string[] | undefined {
 		paths.push(path);
 	}
 	if (paths.length === 0) throw new Error("rm requires at least one Markdown path");
-	return paths;
+	return { paths, force };
 }
 
 export async function prepareRestrictedBash(command: string, policy: RestrictedBashPolicy): Promise<PreparedBash> {
 	if (command.includes("\0")) throw new Error("command contains a NUL byte");
 	const deletePaths = parseDelete(command, policy.memoryDir);
-	if (deletePaths) return { kind: "delete", paths: deletePaths };
+	if (deletePaths) return { kind: "delete", ...deletePaths };
 
 	const decision = classifyReadOnlyBash(command, { platform: process.platform });
 	if (!decision.readOnly) throw new Error(decision.reason);

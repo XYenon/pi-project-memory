@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, chmod, lstat, mkdir, open, readFile, realpath, rename } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, open, readFile, realpath, rename, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -221,20 +221,20 @@ export async function resolveProjectPaths(
 	};
 }
 
-async function ensurePrivateDirectory(path: string, label: string): Promise<void> {
+async function ensurePrivateDirectory(path: string, label: string, followLinks = false): Promise<void> {
 	const existed = await lstat(path).then(
 		() => true,
 		() => false,
 	);
 	await mkdir(path, { recursive: true, mode: 0o700 });
-	const info = await lstat(path);
-	if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${label} must be a real directory`);
+	const info = followLinks ? await stat(path) : await lstat(path);
+	if (!info.isDirectory()) throw new Error(`${label} must be a directory`);
 	if (!existed) await chmod(path, 0o700);
 }
 
 export async function initializeProjectPaths(paths: ProjectPaths): Promise<void> {
 	await ensurePrivateDirectory(paths.baseDir, "Project memory state root");
-	await ensurePrivateDirectory(paths.memoryDir, "Memory root");
+	await ensurePrivateDirectory(paths.memoryDir, "Memory root", true);
 	await ensurePrivateDirectory(paths.locksDir, "Lock root");
 	const namespaceDir = paths.namespaceDir ?? paths.baseDir;
 	if (!(await reserveNamespace(namespaceDir, paths.projectRoot)))

@@ -55,9 +55,23 @@ test("package metadata declares the supported Unix platforms", async () => {
 	assert.deepEqual(packageJson.os, ["darwin", "linux", "android"]);
 });
 
-test("parseConfig bounds unsafe numeric input and preserves defaults", () => {
-	const config = parseConfig({ extraction: { maxTurns: 999, everyNTurns: 0 }, dream: { minimumOtherSessions: -2 } });
-	assert.equal(config.extraction.maxTurns, DEFAULT_CONFIG.extraction.maxTurns);
-	assert.equal(config.extraction.everyNTurns, DEFAULT_CONFIG.extraction.everyNTurns);
-	assert.equal(config.dream.minimumOtherSessions, DEFAULT_CONFIG.dream.minimumOtherSessions);
+test("parseConfig accepts large safe integers without field-specific maxima", () => {
+	const large = Number.MAX_SAFE_INTEGER;
+	const config = parseConfig({
+		models: Object.fromEntries(["selector", "extractor", "dream"].map((role) => [role, { maxTokens: large }])),
+		extraction: { everyNTurns: large, idleFlushSeconds: large, maxTurns: large, recentMessages: large },
+		dream: { minimumHours: large, minimumOtherSessions: large, scanThrottleSeconds: large, maxTurns: large },
+	});
+	for (const model of Object.values(config.models)) assert.equal(model.maxTokens, large);
+	for (const [key, value] of Object.entries(config.extraction)) if (key !== "enabled") assert.equal(value, large);
+	for (const [key, value] of Object.entries(config.dream)) if (key !== "enabled") assert.equal(value, large);
+});
+
+test("parseConfig rejects invalid numbers and values below minima", () => {
+	for (const value of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, "100"]) {
+		const config = parseConfig({ models: { dream: { maxTokens: value } }, extraction: { maxTurns: value } });
+		assert.equal(config.models.dream.maxTokens, DEFAULT_CONFIG.models.dream.maxTokens);
+		assert.equal(config.extraction.maxTurns, DEFAULT_CONFIG.extraction.maxTurns);
+	}
+	assert.equal(parseConfig({ extraction: { everyNTurns: 0 } }).extraction.everyNTurns, 1);
 });

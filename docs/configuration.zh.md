@@ -51,24 +51,24 @@
 | `autoMemoryDirectory`              | `string \| null`      | `null`      | `null`，或合法的绝对路径 / `~/` 开头路径（空白字符串或非法路径回退默认）                           | 无                      | 覆盖项目默认的 `memory/` 存储目录（仅下次会话启动生效）。       |
 | `models.selector.model`            | `string`              | `"inherit"` | `"inherit"`，或以第一个 `/` 分隔 `provider` 与非空 `model-id` 的字符串（`model-id` 可含 `/`）      | 无                      | Selector（相关记忆挑选）使用的模型。                            |
 | `models.selector.thinkingLevel`    | `string`              | `"off"`     | `"inherit"` \| `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | 无                      | Selector 的思考预算档位（会自动夹紧到模型支持的最接近档位）。   |
-| `models.selector.maxTokens`        | `"inherit" \| number` | `512`       | `"inherit"` 或 `64` 到 `65536` 的安全整数                                                          | 输出 token              | Selector 单次调用的最大输出 token 数。                          |
+| `models.selector.maxTokens`        | `"inherit" \| number` | `512`       | `"inherit"` 或 不小于 `64` 的安全整数                                                              | 输出 token              | Selector 单次调用的最大输出 token 数。                          |
 | `models.selector.structuredOutput` | `boolean`             | `true`      | `true` 或 `false`                                                                                  | 无                      | 是否对支持的协议优先使用原生 JSON Schema 输出格式。             |
 | `models.extractor.model`           | `string`              | `"inherit"` | `"inherit"`，或以第一个 `/` 分隔 `provider` 与非空 `model-id` 的字符串（`model-id` 可含 `/`）      | 无                      | Extractor（回合后提取）使用的模型。                             |
 | `models.extractor.thinkingLevel`   | `string`              | `"inherit"` | `"inherit"` \| `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | 无                      | Extractor 的思考预算档位，默认继承主会话。                      |
-| `models.extractor.maxTokens`       | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 `64` 到 `65536` 的安全整数                                                          | 输出 token              | Extractor 单次模型请求的最大输出 token 数。                     |
+| `models.extractor.maxTokens`       | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 不小于 `64` 的安全整数                                                              | 输出 token              | Extractor 单次模型请求的最大输出 token 数。                     |
 | `models.dream.model`               | `string`              | `"inherit"` | `"inherit"`，或以第一个 `/` 分隔 `provider` 与非空 `model-id` 的字符串（`model-id` 可含 `/`）      | 无                      | Dream（定期整理）使用的模型。                                   |
 | `models.dream.thinkingLevel`       | `string`              | `"inherit"` | `"inherit"` \| `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | 无                      | Dream 的思考预算档位，默认继承主会话。                          |
-| `models.dream.maxTokens`           | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 `64` 到 `65536` 的安全整数                                                          | 输出 token              | Dream 单次模型请求的最大输出 token 数。                         |
+| `models.dream.maxTokens`           | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 不小于 `64` 的安全整数                                                              | 输出 token              | Dream 单次模型请求的最大输出 token 数。                         |
 | `extraction.enabled`               | `boolean`             | `true`      | `true` 或 `false`                                                                                  | 无                      | 是否开启自动提取（关闭后仍可手动运行 `/memory extract`）。      |
-| `extraction.everyNTurns`           | `number`              | `1`         | `1` 到 `100` 的安全整数                                                                            | 正常结束的对话轮次      | 每累积多少个已结束轮次（settled turns）运行一次自动提取。       |
-| `extraction.idleFlushSeconds`      | `number`              | `120`       | `0` 到 `86400` 的安全整数（`0` 表示禁用空闲提取）                                                  | 秒                      | 轮次未达到 `everyNTurns` 时，空闲多久后自动提取未处理消息。     |
-| `extraction.maxTurns`              | `number`              | `5`         | `1` 到 `8` 的安全整数                                                                              | 子 Agent 工具轮次       | Extractor 单次任务允许的最大模型请求与工具调用循环次数。        |
-| `extraction.recentMessages`        | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 `3` 到 `1000` 的安全整数                                                            | `user`/`assistant` 条数 | 每次提供给 extractor 的最近对话消息上限。                       |
+| `extraction.everyNTurns`           | `number`              | `1`         | 不小于 `1` 的安全整数                                                                              | 正常结束的对话轮次      | 每累积多少个已结束轮次（settled turns）运行一次自动提取。       |
+| `extraction.idleFlushSeconds`      | `number`              | `120`       | 不小于 `0` 的安全整数（`0` 表示禁用空闲提取）                                                      | 秒                      | 轮次未达到 `everyNTurns` 时，空闲多久后自动提取未处理消息。     |
+| `extraction.maxTurns`              | `number`              | `5`         | 不小于 `1` 的安全整数                                                                              | 子 Agent 工具轮次       | Extractor 单次任务允许的最大模型请求与工具调用循环次数。        |
+| `extraction.recentMessages`        | `"inherit" \| number` | `"inherit"` | `"inherit"` 或 不小于 `3` 的安全整数                                                               | `user`/`assistant` 条数 | 每次提供给 extractor 的最近对话消息上限。                       |
 | `dream.enabled`                    | `boolean`             | `true`      | `true` 或 `false`                                                                                  | 无                      | Dream 总开关（关闭后自动整理与手动 `/memory dream` 均不可用）。 |
-| `dream.minimumHours`               | `number`              | `24`        | `1` 到 `8760` 的安全整数                                                                           | 小时                    | 两次自动整理尝试之间的最短间隔时间。                            |
-| `dream.minimumOtherSessions`       | `number`              | `5`         | `1` 到 `1000` 的安全整数                                                                           | 会话数（不含当前会话）  | 上次整理尝试后，至少需要有多少个其他项目会话更新过才触发整理。  |
-| `dream.scanThrottleSeconds`        | `number`              | `600`       | `0` 到 `86400` 的安全整数（`0` 表示不节流）                                                        | 秒                      | 同一进程内满足 `minimumHours` 后扫描会话目录的最短间隔时间。    |
-| `dream.maxTurns`                   | `number`              | `50`        | `1` 到 `50` 的安全整数                                                                             | 子 Agent 工具轮次       | Dream 单次任务允许的最大模型请求与工具调用循环次数。            |
+| `dream.minimumHours`               | `number`              | `24`        | 不小于 `1` 的安全整数                                                                              | 小时                    | 两次自动整理尝试之间的最短间隔时间。                            |
+| `dream.minimumOtherSessions`       | `number`              | `5`         | 不小于 `1` 的安全整数                                                                              | 会话数（不含当前会话）  | 上次整理尝试后，至少需要有多少个其他项目会话更新过才触发整理。  |
+| `dream.scanThrottleSeconds`        | `number`              | `600`       | 不小于 `0` 的安全整数（`0` 表示不节流）                                                            | 秒                      | 同一进程内满足 `minimumHours` 后扫描会话目录的最短间隔时间。    |
+| `dream.maxTurns`                   | `number`              | `50`        | 不小于 `1` 的安全整数                                                                              | 子 Agent 工具轮次       | Dream 单次任务允许的最大模型请求与工具调用循环次数。            |
 
 ## 各字段详细说明与相互关系
 
@@ -94,7 +94,7 @@
      - 不能包含空字节 `\0`。
      - 展开并去掉末尾斜杠后，字符长度必须至少为 3，且不能是根目录 `/` 或 Windows 盘符根（如 `C:`）。
      - 路径中任何一段目录名（按 `/` 或 `\` 拆分，不区分大小写）不能是版本控制元数据目录：`.git`、`.hg`、`.svn`、`.bzr`、`.jj`、`.sl`。
-  3. `initializeProjectPaths()` 阶段：如果目标路径在磁盘上已经存在，但本身是一个符号链接（symlink）或非目录文件，初始化会直接抛出错误拒绝运行。
+  3. `initializeProjectPaths()` 阶段：记忆根目录可使用指向有效目录的符号链接；目标为普通文件或悬空链接时初始化失败。项目状态目录和锁目录仍要求真实目录。
 
 ### 2. 模型配置（`models`）
 
@@ -110,7 +110,7 @@
   - `"inherit"` 在任务启动时读取主会话当前的 `ctx.thinkingLevel`；若宿主未提供该值则使用 `"off"`。显式档位优先，包括已有配置文件中的值。
   - 运行时会通过 Pi 的 `clampThinkingLevel(model, configured)` 映射到该模型实际支持的最近档位（例如对不支持推理的模型会自动降为 `"off"`）。当最终生效档位为 `"off"` 时，请求不传 `reasoning` 参数。
 - **`maxTokens`**：
-  - 允许值为 `"inherit"` 或 `64` 到 `65536` 之间的整数（超出范围如 `32` 或 `100000` 会回退为该角色的默认值：selector 回退为 `512`，extractor 和 dream 回退为 `"inherit"`）。
+  - 允许值为 `"inherit"` 或不小于 `64` 的安全整数，不设置字段专用最大值。无效值回退为角色默认值；模型与 provider 的实际限制仍由宿主处理。
   - 设为 `"inherit"` 时，调用 `streamSimple()` 不传 `maxTokens`，沿用模型或 provider 的默认上限。
 
 #### `models.selector` 专属字段与行为
@@ -130,20 +130,20 @@
 ### 3. 自动提取配置（`extraction`）
 
 - **`enabled`（`boolean`，默认 `true`）**：控制是否在轮次结束（`agent_settled`）、空闲超时（idle）、会话压缩前（`session_before_compact`）和会话退出时（`session_shutdown`）自动运行提取。设为 `false` 时上述自动触发全部停用，但用户在命令行手动执行 `/memory extract` **仍然可以运行**（前提是顶层 `enabled` 为 `true` 且未提取消息满足至少 3 个词的用户正文门槛）。
-- **`everyNTurns`（`1` 到 `100`，默认 `1`）**：每完成多少个正常结束的对话轮次运行一次自动提取。例如设为 `3` 时，第 1、2 轮结束时不会立即提取，而是启动空闲计时器；到第 3 轮结束时立即提取并将轮次计数归零。
-- **`idleFlushSeconds`（`0` 到 `86400`，默认 `120`，单位：秒）**：与 `everyNTurns` 配合使用。当 `everyNTurns > 1` 且当前累积轮次尚未达到阈值，或者上一轮提取因锁占用/后续合并（trailing extraction）需要稍后重试时，如果会话持续空闲达到 `idleFlushSeconds` 秒，扩展会自动触发一次提取。设为 `0` 时关闭空闲计时器触发。
-- **`maxTurns`（`1` 到 `8`，默认 `5`）**：限制 extractor 子 Agent 最多执行多少轮模型调用与工具执行循环。推荐策略是第 1 轮并发读取所有可能更新的记忆文件，第 2 轮并发写入或编辑。如果在最后一轮模型仍返回了工具调用，扩展会执行完该轮工具调用后结束任务，不再发起下一次模型请求。
-- **`recentMessages`（`"inherit"` 或 `3` 到 `1000`，默认 `"inherit"`）**：控制从提取游标（cursor）之后的未处理消息切片中，向后截取多少条 `user` 和 `assistant` 消息发送给 extractor：
+- **`everyNTurns`（不小于 `1`，默认 `1`）**：每完成多少个正常结束的对话轮次运行一次自动提取。例如设为 `3` 时，第 1、2 轮结束时不会立即提取，而是启动空闲计时器；到第 3 轮结束时立即提取并将轮次计数归零。
+- **`idleFlushSeconds`（不小于 `0`，默认 `120`，单位：秒）**：与 `everyNTurns` 配合使用。当 `everyNTurns > 1` 且当前累积轮次尚未达到阈值，或者上一轮提取因锁占用/后续合并（trailing extraction）需要稍后重试时，如果会话持续空闲达到 `idleFlushSeconds` 秒，扩展会自动触发一次提取。设为 `0` 时关闭空闲计时器触发。
+- **`maxTurns`（不小于 `1`，默认 `5`）**：限制 extractor 子 Agent 最多执行多少轮模型调用与工具执行循环。推荐策略是第 1 轮并发读取所有可能更新的记忆文件，第 2 轮并发写入或编辑。如果在最后一轮模型仍返回了工具调用，扩展会执行完该轮工具调用后结束任务，不再发起下一次模型请求。
+- **`recentMessages`（`"inherit"` 或 不小于 `3`，默认 `"inherit"`）**：控制从提取游标（cursor）之后的未处理消息切片中，向后截取多少条 `user` 和 `assistant` 消息发送给 extractor：
   - 设为 `"inherit"` 时，提取目标为游标之后的全部未处理消息；若有同模型的可复用父请求快照，会同时保留完整父历史作为缓存前缀，任务指令仍只针对近期未处理范围。没有可复用快照时只发送未处理消息。
-  - 设为整数 `N`（`3` 到 `1000`）时，禁用完整父前缀复用，从切片末尾向前数满 `N` 条 `user` 或 `assistant` 消息，并保留这 `N` 条消息之间的所有 `toolResult` 消息。
+  - 设为整数 `N`（不小于 `3`）时，禁用完整父前缀复用，从切片末尾向前数满 `N` 条 `user` 或 `assistant` 消息，并保留这 `N` 条消息之间的所有 `toolResult` 消息。
 
 ### 4. 定期整理配置（`dream`）
 
 - **`enabled`（`boolean`，默认 `true`）**：Dream 功能的总门控。与 `extraction.enabled` 不同，当 `dream.enabled` 设为 `false` 时，不仅自动整理会停用，**手动运行 `/memory dream` 也会被拒绝**（提示 `Memory dream is disabled by the global dream gate`）。
-- **`minimumHours`（`1` 到 `8760`，默认 `24`，单位：小时）**：自动整理的时间门槛。要求当前时间距离共享状态文件 `state.json` 中的 `lastDreamAt` 至少经过 `minimumHours * 3600` 秒。
-- **`minimumOtherSessions`（`1` 到 `1000`，默认 `5`，单位：会话数）**：自动整理的会话数量门槛。在满足 `minimumHours` 后，扩展会扫描当前项目的 session 目录，统计修改时间（`mtimeMs`）晚于 `lastDreamAt` 且不等于当前会话的文件数量（按合法的 session header `id` 去重）。只有当其他会话数达到 `minimumOtherSessions` 时才会启动自动整理。手动运行 `/memory dream` 会跳过 `minimumHours`、`minimumOtherSessions` 和 `scanThrottleSeconds` 三个门槛，但仍会把扫描到的近期会话 ID 列表传给 dream 模型。
-- **`scanThrottleSeconds`（`0` 到 `86400`，默认 `600`，单位：秒）**：进程内目录扫描节流时间。当距离上次整理尝试已满 `minimumHours`，但活跃的其他会话数还不到 `minimumOtherSessions` 时，为了避免每个对话轮次结束都重复遍历 session 目录，同一个 Pi 进程内至少间隔 `scanThrottleSeconds` 秒才会再次扫描 session 目录。设为 `0` 时每轮都会扫描。
-- **`maxTurns`（`1` 到 `50`，默认 `50`）**：Dream 子 Agent 的最大工具循环轮次。
+- **`minimumHours`（不小于 `1`，默认 `24`，单位：小时）**：自动整理的时间门槛。要求当前时间距离共享状态文件 `state.json` 中的 `lastDreamAt` 至少经过 `minimumHours * 3600` 秒。
+- **`minimumOtherSessions`（不小于 `1`，默认 `5`，单位：会话数）**：自动整理的会话数量门槛。在满足 `minimumHours` 后，扩展会扫描当前项目的 session 目录，统计修改时间（`mtimeMs`）晚于 `lastDreamAt` 且不等于当前会话的文件数量（按合法的 session header `id` 去重）。只有当其他会话数达到 `minimumOtherSessions` 时才会启动自动整理。手动运行 `/memory dream` 会跳过 `minimumHours`、`minimumOtherSessions` 和 `scanThrottleSeconds` 三个门槛，但仍会把扫描到的近期会话 ID 列表传给 dream 模型。
+- **`scanThrottleSeconds`（不小于 `0`，默认 `600`，单位：秒）**：进程内目录扫描节流时间。当距离上次整理尝试已满 `minimumHours`，但活跃的其他会话数还不到 `minimumOtherSessions` 时，为了避免每个对话轮次结束都重复遍历 session 目录，同一个 Pi 进程内至少间隔 `scanThrottleSeconds` 秒才会再次扫描 session 目录。设为 `0` 时每轮都会扫描。
+- **`maxTurns`（不小于 `1`，默认 `50`）**：Dream 子 Agent 的最大工具循环轮次。
 
 ## 有效 JSON 配置示例
 
@@ -261,9 +261,7 @@
             ├── extract.lock.recover         # 接管过期 extract.lock 时短暂存在的仲裁锁
             ├── dream.lock                   # 后台整理任务互斥锁（超时 60 分钟）
             ├── dream.lock.recover           # 接管过期 dream.lock 时短暂存在的仲裁锁
-            ├── last-dream-at.lock           # 更新 state.json 中 lastDreamAt 时的 CAS 锁（超时 1 分钟）
-            └── files/                       # 单文件写入/编辑/删除互斥锁目录
-                └── <file-path-sha256>.lock  # 按目标 Markdown 绝对路径 SHA-256 命名的文件锁（超时 15 分钟）
+            └── last-dream-at.lock           # 更新 state.json 中 lastDreamAt 时的 CAS 锁（超时 1 分钟）
 
 <autoMemoryDirectory>/                       # 当配置了有效 autoMemoryDirectory 时的自定义记忆目录
 ├── MEMORY.md                                # 记忆索引文件
@@ -322,7 +320,6 @@
 - `extract.lock`：保证同一记忆根目录在同一时刻最多只有一个进程运行 extractor（stale 超时为 15 分钟）。
 - `dream.lock`：保证同一记忆根目录在同一时刻最多只有一个进程运行 dream（stale 超时为 60 分钟）。
 - `last-dream-at.lock`：在 compare-and-swap 更新 `state.json` 中的 `lastDreamAt` 时提供短周期互斥保护（stale 超时为 1 分钟）。
-- `files/<sha256(resolve(filePath))>.lock`：后台子 Agent 写入、编辑或删除某个具体 `.md` 文件时的单文件跨进程锁（stale 超时为 15 分钟）。
 - `*.lock.recover`：当某个锁文件已超过 stale 时间且原持有者 `pid` 进程已不存在时，竞争接管的进程会先以 `wx` 创建对应的 `.recover` 文件完成二次确认，移除死锁后立即删除 `.recover` 文件。
 - `.<filename>.<pid>.<uuid>.tmp`：在更新 `state.json` 或记忆目录下的 `.md` 文件时，扩展会先在目标文件所在目录创建权限为 `0600` 的 `.tmp` 临时文件，写入完整内容并通过校验后，再通过 `link` + `rm`（新建文件防覆盖）或 `rename`（原子替换已有文件）发布，并在 `finally` 块中强制清理残留的 `.tmp` 文件。
 

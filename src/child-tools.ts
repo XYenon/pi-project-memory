@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, copyFile, lstat, mkdir, readFile, realpath, rm, stat } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
 	createBashTool,
@@ -36,7 +36,6 @@ interface ToolEnvironment {
 	onTouched?: (relativePath: string, hash: string | null) => void | Promise<void>;
 }
 
-const MAX_TEXT_FILE_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
 const MAX_BASH_TIMEOUT_SECONDS = 600;
 
@@ -63,22 +62,11 @@ async function resolveReadablePath(env: ToolEnvironment, rawPath: string): Promi
 	return realpath(resolveToolPath(env.cwd, rawPath));
 }
 
-function decodeUtf8(buffer: Buffer): string {
-	if (buffer.includes(0)) throw new Error("Binary files containing NUL bytes are not supported");
-	try {
-		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer);
-	} catch {
-		throw new Error("File is not valid UTF-8; legacy encodings and binary files are not supported");
-	}
-}
-
 async function readRegularUtf8(filePath: string): Promise<{ content: string; baseline: ReadBaseline }> {
 	const before = await stat(filePath);
 	if (!before.isFile()) throw new Error("Only regular files can be read");
-	if (before.size > MAX_TEXT_FILE_BYTES)
-		throw new Error(`Text file exceeds the ${MAX_TEXT_FILE_BYTES}-byte safety limit`);
 	const buffer = await readFile(filePath);
-	const content = decodeUtf8(buffer);
+	const content = buffer.toString("utf8");
 	const after = await stat(filePath);
 	if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error("File changed while it was read");
 	return { content, baseline: { hash: sha256(content), mtimeMs: after.mtimeMs, size: after.size } };
@@ -113,10 +101,14 @@ async function revalidateWritablePath(env: ToolEnvironment, filePath: string, si
 	assertChildRunAllowed(env, signal);
 	const [root, parent] = await Promise.all([realpath(env.memoryDir), realpath(dirname(filePath))]);
 	if (!isContainedPath(root, parent)) throw new Error("Write parent resolves outside the memory directory");
-	if (parent !== dirname(filePath)) throw new Error("Write parent changed identity or uses a symlink");
 }
 
-async function resolveWritablePath(env: ToolEnvironment, rawPath: string, signal?: AbortSignal): Promise<string> {
+async function resolveWritablePath(
+	env: ToolEnvironment,
+	rawPath: string,
+	signal?: AbortSignal,
+	followTarget = true,
+): Promise<string> {
 	assertChildRunAllowed(env, signal);
 	const absolute = assertContainedMarkdown(env.memoryDir, resolveToolPath(env.cwd, rawPath));
 	const canonicalMemoryRoot = await realpath(env.memoryDir);
@@ -124,20 +116,17 @@ async function resolveWritablePath(env: ToolEnvironment, rawPath: string, signal
 	await ensureSafeParentDirectories(canonicalMemoryRoot, dirname(expected));
 	try {
 		const targetInfo = await lstat(expected);
-		if (targetInfo.isSymbolicLink() || !targetInfo.isFile())
+		if (!targetInfo.isSymbolicLink() && !targetInfo.isFile())
 			throw new Error(`Write target is not a regular file: ${rawPath}`);
+		if (!followTarget) return join(await realpath(dirname(expected)), basename(expected));
 		const canonical = await realpath(expected);
-		if (canonical !== expected)
-			throw new Error(`Write target is a symlink or resolves outside the memory directory: ${rawPath}`);
+		if (!isContainedPath(canonicalMemoryRoot, canonical))
+			throw new Error(`Write target resolves outside the memory directory: ${rawPath}`);
 		return canonical;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
-	return expected;
-}
-
-function mutationLock(env: ToolEnvironment, filePath: string): string {
-	return join(env.locksDir, "files", `${sha256(resolve(filePath))}.lock`);
+	return join(await realpath(dirname(expected)), basename(expected));
 }
 
 async function memoryPathSet(memoryDir: string, baselines: ReadonlyMap<string, ReadBaseline>): Promise<Set<string>> {
@@ -191,10 +180,10 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 			filePath,
 			expected,
 			() => content,
-			mutationLock(env, filePath),
+			undefined,
 			() => revalidateWritablePath(env, filePath, signal),
 		);
-		baselines.set(filePath, written);
+		baselines.set(filePath, { ...written, mtimeMs: Date.now() });
 		await markTouched(env, filePath, written.hash);
 	}
 
@@ -229,7 +218,7 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 					const validPage =
 						(params.offset === undefined || (Number.isSafeInteger(params.offset) && params.offset >= 0)) &&
 						(params.limit === undefined || (Number.isSafeInteger(params.limit) && params.limit > 0));
-					if (stable && validPage && !truncated) baselines.set(filePath, after.baseline);
+					if (stable && validPage && !truncated) baselines.set(filePath, { ...after.baseline, mtimeMs: Date.now() });
 					else baselines.delete(filePath);
 				}
 				return result;
@@ -399,10 +388,21 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 				});
 				if (prepared.kind === "delete") {
 					for (const path of prepared.paths) {
-						const filePath = await resolveWritablePath(env, path, signal);
-						await safeDeleteMemoryFile(env.memoryDir, filePath, undefined, mutationLock(env, filePath), () =>
-							revalidateWritablePath(env, filePath, signal),
-						);
+						try {
+							await lstat(path);
+						} catch (error) {
+							if (prepared.force && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+							throw error;
+						}
+						const filePath = await resolveWritablePath(env, path, signal, false);
+						try {
+							await safeDeleteMemoryFile(env.memoryDir, filePath, undefined, undefined, () =>
+								revalidateWritablePath(env, filePath, signal),
+							);
+						} catch (error) {
+							if (!prepared.force || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+							continue;
+						}
 						baselines.delete(filePath);
 						await markTouched(env, filePath, null);
 					}

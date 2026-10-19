@@ -39,12 +39,12 @@ function record(value: unknown): Record<string, unknown> | undefined {
 		: undefined;
 }
 
-function integer<T extends number | "inherit">(value: unknown, fallback: T, min: number, max: number): number | T {
-	return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max ? value : fallback;
+function integer<T extends number | "inherit">(value: unknown, fallback: T, min: number): number | T {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= min ? value : fallback;
 }
 
-function inheritedInteger(value: unknown, fallback: "inherit" | number, min: number, max: number): "inherit" | number {
-	return value === "inherit" ? value : integer(value, fallback, min, max);
+function inheritedInteger(value: unknown, fallback: "inherit" | number, min: number): "inherit" | number {
+	return value === "inherit" ? value : integer(value, fallback, min);
 }
 
 function boolean(value: unknown, fallback: boolean): boolean {
@@ -71,7 +71,7 @@ function roleConfig(value: unknown, fallback: RoleModelConfig): RoleModelConfig 
 	return {
 		model,
 		thinkingLevel,
-		maxTokens: inheritedInteger(raw.maxTokens, fallback.maxTokens, 64, 65536),
+		maxTokens: inheritedInteger(raw.maxTokens, fallback.maxTokens, 64),
 	};
 }
 
@@ -100,17 +100,17 @@ export function parseConfig(value: unknown): ProjectMemoryConfig {
 		},
 		extraction: {
 			enabled: boolean(extraction.enabled, DEFAULT_CONFIG.extraction.enabled),
-			everyNTurns: integer(extraction.everyNTurns, DEFAULT_CONFIG.extraction.everyNTurns, 1, 100),
-			idleFlushSeconds: integer(extraction.idleFlushSeconds, DEFAULT_CONFIG.extraction.idleFlushSeconds, 0, 86400),
-			maxTurns: integer(extraction.maxTurns, DEFAULT_CONFIG.extraction.maxTurns, 1, 8),
-			recentMessages: inheritedInteger(extraction.recentMessages, DEFAULT_CONFIG.extraction.recentMessages, 3, 1000),
+			everyNTurns: integer(extraction.everyNTurns, DEFAULT_CONFIG.extraction.everyNTurns, 1),
+			idleFlushSeconds: integer(extraction.idleFlushSeconds, DEFAULT_CONFIG.extraction.idleFlushSeconds, 0),
+			maxTurns: integer(extraction.maxTurns, DEFAULT_CONFIG.extraction.maxTurns, 1),
+			recentMessages: inheritedInteger(extraction.recentMessages, DEFAULT_CONFIG.extraction.recentMessages, 3),
 		},
 		dream: {
 			enabled: boolean(dream.enabled, DEFAULT_CONFIG.dream.enabled),
-			minimumHours: integer(dream.minimumHours, DEFAULT_CONFIG.dream.minimumHours, 1, 8760),
-			minimumOtherSessions: integer(dream.minimumOtherSessions, DEFAULT_CONFIG.dream.minimumOtherSessions, 1, 1000),
-			scanThrottleSeconds: integer(dream.scanThrottleSeconds, DEFAULT_CONFIG.dream.scanThrottleSeconds, 0, 86400),
-			maxTurns: integer(dream.maxTurns, DEFAULT_CONFIG.dream.maxTurns, 1, 50),
+			minimumHours: integer(dream.minimumHours, DEFAULT_CONFIG.dream.minimumHours, 1),
+			minimumOtherSessions: integer(dream.minimumOtherSessions, DEFAULT_CONFIG.dream.minimumOtherSessions, 1),
+			scanThrottleSeconds: integer(dream.scanThrottleSeconds, DEFAULT_CONFIG.dream.scanThrottleSeconds, 0),
+			maxTurns: integer(dream.maxTurns, DEFAULT_CONFIG.dream.maxTurns, 1),
 		},
 	};
 }

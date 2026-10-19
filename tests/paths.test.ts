@@ -200,7 +200,7 @@ test("linked worktrees use the common checkout as the Claude-compatible root", a
 	assert.equal(linkedPaths.baseDir, mainPaths.baseDir);
 });
 
-test("project path initialization keeps existing permissions and rejects a symlink memory root", async (t) => {
+test("project path initialization keeps existing permissions and accepts a symlink memory root", async (t) => {
 	const root = await createTempDirectory(t, "pi-memory-symlink-root-");
 	const target = join(root, "target");
 	const memoryDir = join(root, "memory");
@@ -223,15 +223,14 @@ test("project path initialization keeps existing permissions and rejects a symli
 	assert.equal((await stat(locksDir)).mode & 0o777, 0o777);
 	await rm(locksDir, { recursive: true });
 	await symlink(target, memoryDir);
-	await assert.rejects(
-		initializeProjectPaths({
-			projectRoot: root,
-			projectKey: "test",
-			baseDir: root,
-			memoryDir,
-			stateFile: join(root, "state.json"),
-			locksDir,
-		}),
-		/Memory root must be a real directory/,
-	);
+	await initializeProjectPaths({
+		projectRoot: root,
+		projectKey: "test",
+		baseDir: root,
+		memoryDir,
+		stateFile: join(root, "state.json"),
+		locksDir,
+	});
+	await writeFile(join(memoryDir, "fact.md"), "linked memory");
+	assert.equal(await readFile(join(target, "fact.md"), "utf8"), "linked memory");
 });

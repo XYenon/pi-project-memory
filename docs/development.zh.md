@@ -91,8 +91,9 @@ PI_OFFLINE=1 pi --no-extensions --extension ./index.ts --list-models __no_such_m
 - `tests/child-tools.test.ts`：验证 Pi 原生工具接口、父会话工作目录、读取基线、编辑恢复、目录外读取与无需预读的受限删除。
 - `tests/child-codemode.test.ts`：验证后台任务在 `on` 与 `only` 模式下封装 Pi 原生 `codemode`、仅暴露六个受限工具、隔离任务内 `store()` / `load()`、溢出输出文件重定位与清理，以及脚本执行中途代次失效或中止时的即时拦截。
 - `tests/bash-readonly.test.ts` 与 `tests/search-boundaries.test.ts`：验证只读命令分类、原生 `xargs` 执行、搜索行为与 session 只读访问。
+- `tests/restricted-bash.test.ts`：验证删除命令的静态 AST 参数解析、转义空格、引号拼接与续行，并验证动态展开、重定向和多命令串联不会触发删除。
 - `tests/claude-permissions.test.ts`：验证正文原样落盘、两种后台角色均可读取原始 session，以及 Git 配置包含 include 或 helper 时仍可执行只读查询。
-- `tests/concurrency.test.ts`：通过多子进程 worker（`lock-worker.ts`、`cas-worker.ts`）验证跨进程锁互斥、死进程锁恢复、dream 时间戳 CAS 与文件并发编辑 CAS。
+- `tests/concurrency.test.ts`：验证后台任务锁、dream 时间戳 CAS 与并发编辑的完整文件发布，不要求跨进程编辑只能有一个成功。
 - `tests/lifecycle.test.ts`：端到端验证 Pi 钩子生命周期，包括项目信任门控、`enabled: false` 延迟初始化、2 秒预取等待与延迟 `steer` 送达、普通与排队输入的空白门槛、图片归一化去重、完整读取抑制与分支恢复、满 48 小时过期提醒、写后 lint、主 Agent 直接写入去重、三词用户正文门槛、新输入触发 `trailingExtraction`、会话压缩前提取与状态重置、dream 尝试时间保留与异常回滚，以及进程内后台 usage 累计。
 
 缓存回归覆盖索引快照及刷新边界、完整 selector 目录的已读过滤、短期缓存与稳定会话缓存标识、同模型父前缀及 Faux 缓存命中、声明保留但不能执行的父工具、受限写入，以及跨模型、schema 不兼容、整数消息上限和图片阻止时的独立请求回退。Faux 命中只验证请求复用机制，不代表真实 provider 的命中率或账单。

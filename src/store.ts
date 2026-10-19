@@ -8,6 +8,7 @@ import {
 	mkdir,
 	open,
 	readdir,
+	readFile,
 	realpath,
 	rename,
 	rm,
@@ -131,16 +132,16 @@ export async function backfillIndex(memoryDir: string): Promise<boolean> {
 export async function readIndex(memoryDir: string): Promise<string> {
 	// Optional prompt-index boundary, matching Claude's XNe/BJn loaders: an
 	// unreadable index or failed backfill omits index context for this request.
-	// readRegularFileNoFollow and backfillIndex still throw for direct callers.
+	// Reads follow local private memory symlinks; lock readers remain no-follow.
 	const indexPath = join(memoryDir, INDEX_FILE);
 	try {
-		return truncateIndex(await readRegularFileNoFollow(indexPath));
+		return truncateIndex(await readFile(indexPath, "utf8"));
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "";
 	}
 	try {
 		await backfillIndex(memoryDir);
-		return truncateIndex(await readRegularFileNoFollow(indexPath));
+		return truncateIndex(await readFile(indexPath, "utf8"));
 	} catch {
 		return "";
 	}
@@ -179,18 +180,6 @@ function memoryType(type: unknown): MemoryTopic["type"] {
 	return type === "user" || type === "feedback" || type === "project" || type === "reference" ? type : "unknown";
 }
 
-function decodeUtf8Prefix(buffer: Buffer, filePath: string): string {
-	if (buffer.includes(0)) throw new Error(`Memory file contains binary NUL bytes: ${filePath}`);
-	for (let trim = 0; trim <= 3 && trim <= buffer.length; trim++) {
-		try {
-			return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
-				trim === 0 ? buffer : buffer.subarray(0, buffer.length - trim),
-			);
-		} catch {}
-	}
-	throw new Error(`Memory file is not valid UTF-8: ${filePath}`);
-}
-
 function descriptionFallback(body: string): string {
 	const first = body
 		.split("\n")
@@ -209,7 +198,7 @@ async function scanTopicsInternal(
 	const relativePaths = await fg("**/*.md", {
 		cwd: memoryDir,
 		onlyFiles: true,
-		followSymbolicLinks: false,
+		followSymbolicLinks: true,
 		dot: false,
 		unique: true,
 	});
@@ -226,13 +215,15 @@ async function scanTopicsInternal(
 			filenames.slice(offset, offset + TOPIC_SCAN_CONCURRENCY).map(async (filename) => {
 				const filePath = resolve(memoryDir, filename);
 				if (!isContainedPath(memoryDir, filePath)) throw new Error("escaped memory path");
-				const handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+				const handle = await open(filePath, constants.O_RDONLY);
 				try {
 					const info = await handle.stat();
 					if (!info.isFile()) throw new Error("not a regular file");
 					const buffer = Buffer.alloc(65_536);
 					const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-					const head = decodeUtf8Prefix(buffer.subarray(0, bytesRead), filePath)
+					const head = buffer
+						.subarray(0, bytesRead)
+						.toString("utf8")
 						.replace(/^\uFEFF/, "")
 						.replace(/\r\n?/g, "\n")
 						.split("\n")
@@ -276,11 +267,10 @@ export async function scanTopics(memoryDir: string): Promise<MemoryTopic[]> {
 }
 
 export async function recallTopic(topic: MemoryTopic): Promise<RecallItem> {
-	const handle = await open(topic.filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+	const handle = await open(topic.filePath, constants.O_RDONLY);
 	try {
 		const info = await handle.stat();
 		if (!info.isFile()) throw new Error(`Not a regular file: ${topic.filePath}`);
-		if (info.mtimeMs !== topic.mtimeMs) throw new Error(`Memory topic changed before recall: ${topic.filePath}`);
 		// One byte past the recall budget is enough to prove byte truncation. This
 		// avoids loading an unbounded topic while retaining only complete UTF-8
 		// lines, so a cut cannot silently corrupt the recalled text.
@@ -308,21 +298,18 @@ export async function recallTopic(topic: MemoryTopic): Promise<RecallItem> {
 				truncatedByLines = true;
 				break;
 			}
-			const nextBytes = selectedBytes + (selected.length > 0 ? 1 : 0) + line.length;
+			const text = line.toString("utf8");
+			const nextBytes = selectedBytes + (selected.length > 0 ? 1 : 0) + Buffer.byteLength(text);
 			if (nextBytes > TOPIC_BYTE_CAP) {
 				truncatedByBytes = true;
 				break;
 			}
-			if (line.includes(0)) throw new Error(`Memory topic contains binary NUL bytes: ${topic.filePath}`);
-			selected.push(new TextDecoder("utf-8", { fatal: true }).decode(line));
+			selected.push(text);
 			selectedBytes = nextBytes;
 			if (newline < 0) break;
 			cursor = newline + 1;
 		}
 		if (!truncatedByBytes && bytesRead < info.size) truncatedByBytes = true;
-		const after = await handle.stat();
-		if (info.mtimeMs !== after.mtimeMs || info.size !== after.size)
-			throw new Error(`Memory topic changed while it was recalled: ${topic.filePath}`);
 		const visible = selected.join("\n");
 		return {
 			path: topic.filePath,
@@ -423,7 +410,7 @@ export function sameBaseline(left: ReadBaseline, right: ReadBaseline): boolean {
 
 function baselineChanged(current: ReadBaseline | null, expected: ReadBaseline | null): boolean {
 	if (current === null || expected === null) return current !== expected;
-	return !sameBaseline(current, expected);
+	return Math.floor(current.mtimeMs) > expected.mtimeMs && !sameBaseline(current, expected);
 }
 
 export async function assertBaseline(filePath: string, expected: ReadBaseline): Promise<void> {
@@ -500,22 +487,7 @@ export async function atomicWriteIfBaseline(
 					throw new Error(`File has been modified since it was read: ${filePath}. Read it again before editing.`);
 				options.onChangedBaseline?.();
 			}
-			await publishFile(
-				filePath,
-				update(current),
-				async () => {
-					await guard?.();
-					let latest: ReadBaseline | null = null;
-					try {
-						latest = await baseline(filePath);
-					} catch (error) {
-						if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-					}
-					if (baselineChanged(latest, currentBaseline))
-						throw new Error(`File changed while the update was staged: ${filePath}. Read it again before editing.`);
-				},
-				currentBaseline === null,
-			);
+			await publishFile(filePath, update(current), guard, currentBaseline === null);
 			return baseline(filePath);
 		});
 	} finally {
@@ -962,7 +934,8 @@ export async function safeDeleteMemoryFile(
 	lockFile?: string,
 	guard?: () => void | Promise<void>,
 ): Promise<void> {
-	const [canonicalRoot, canonicalFile] = await Promise.all([realpath(memoryDir), realpath(filePath)]);
+	const [canonicalRoot, canonicalParent] = await Promise.all([realpath(memoryDir), realpath(dirname(filePath))]);
+	const canonicalFile = join(canonicalParent, basename(filePath));
 	if (!isContainedPath(canonicalRoot, canonicalFile) || !canonicalFile.endsWith(".md"))
 		throw new Error("delete target is outside memory or is not lowercase .md");
 	const release = lockFile ? await acquireLock(lockFile, 15 * 60_000) : undefined;

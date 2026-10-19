@@ -1283,12 +1283,6 @@ function fail(reason: string, commands: BashCommandInfo[] = []): BashReadOnlyDec
 	return { readOnly: false, reason, commands };
 }
 
-function descendants(node: Parser.SyntaxNode): Parser.SyntaxNode[] {
-	const result: Parser.SyntaxNode[] = [node];
-	for (const child of node.namedChildren) result.push(...descendants(child));
-	return result;
-}
-
 function containsType(node: Parser.SyntaxNode, types: ReadonlySet<string>): boolean {
 	return types.has(node.type) || node.namedChildren.some((child) => containsType(child, types));
 }
@@ -1296,20 +1290,6 @@ function containsType(node: Parser.SyntaxNode, types: ReadonlySet<string>): bool
 function containsBackgroundOperator(node: Parser.SyntaxNode): boolean {
 	if (node.type === "&" || node.text === "&") return true;
 	return node.children.some(containsBackgroundOperator);
-}
-
-function compoundCdHasDeterministicCwd(root: Parser.SyntaxNode): boolean {
-	if (containsType(root, new Set(["pipeline"]))) return false;
-	if (root.namedChildren.length !== 1 || root.namedChildren[0]?.type !== "list") return false;
-	for (const node of descendants(root)) {
-		if (node.type !== "list") continue;
-		const connectors = node.children
-			.filter((child) => !child.isNamed)
-			.map((child) => child.text.trim())
-			.filter(Boolean);
-		if (connectors.some((connector) => connector !== "&&")) return false;
-	}
-	return true;
 }
 
 function staticValue(node: Parser.SyntaxNode): string | null {
@@ -1384,6 +1364,7 @@ function normalizeTestCommand(node: Parser.SyntaxNode): NormalizedCommand | null
 function normalizeCommand(node: Parser.SyntaxNode): NormalizedCommand | null {
 	const env: Record<string, string> = {};
 	const argv: string[] = [];
+	let previousEnd: number | undefined;
 	for (const child of node.namedChildren) {
 		if (child.type === "variable_assignment") {
 			const parsed = assignment(child);
@@ -1394,11 +1375,34 @@ function normalizeCommand(node: Parser.SyntaxNode): NormalizedCommand | null {
 		if (["command_name", "word", "number", "raw_string", "string", "concatenation"].includes(child.type)) {
 			const value = staticValue(child);
 			if (value === null) return null;
-			argv.push(value);
+			const gap =
+				previousEnd === undefined
+					? ""
+					: node.text.slice(previousEnd - node.startIndex, child.startIndex - node.startIndex);
+			if (/^(?:\\\n)+$/.test(gap)) argv[argv.length - 1] += value;
+			else argv.push(value);
+			previousEnd = child.endIndex;
 		}
 	}
 	if (argv.length === 0) return null;
 	return { argv, env, redirects: [], hasGlob: hasUnquotedGlob(node) };
+}
+
+/** Parse one literal command without assignments, redirects, or shell expansion. */
+export function parseStaticBashCommand(command: string): string[] | null {
+	let tree: Parser.Tree;
+	try {
+		tree = parser.parse(command);
+	} catch {
+		return null;
+	}
+	if (tree.rootNode.hasError || containsBackgroundOperator(tree.rootNode)) return null;
+	const nodes = tree.rootNode.namedChildren.filter((node) => node.type !== "comment");
+	if (nodes.length !== 1 || nodes[0]?.type !== "command") return null;
+	const node = nodes[0];
+	const argumentTypes = new Set(["command_name", "word", "number", "raw_string", "string", "concatenation"]);
+	if (node.namedChildren.some((child) => !argumentTypes.has(child.type))) return null;
+	return normalizeCommand(node)?.argv ?? null;
 }
 
 function collectCommands(root: Parser.SyntaxNode): NormalizedCommand[] | null {
@@ -1686,10 +1690,44 @@ function dangerousGhArgument(value: string): boolean {
 	return (value.match(/\//g) ?? []).length >= 2;
 }
 
-function safeSedScript(script: string, quiet: boolean): boolean {
-	if (!script || /[\r\n{}]/.test(script) || /(^|[^\\])[wWeEr]/.test(script)) return false;
-	if (quiet && /^\s*(?:\d+(?:,\d+)?)?p\s*$/.test(script)) return true;
-	return /^s\/([^\n]*)\/([^\n]*)\/([gpimIM]*|\d+)$/.test(script);
+function safeSedScripts(scripts: string[], parsed: ParsedOptions, quiet: boolean, hasFiles: boolean): boolean {
+	if (scripts.length === 0) return false;
+	const flags = [...parsed.occurrences.keys()];
+	const printingFlags = new Set([
+		"-n",
+		"--quiet",
+		"--silent",
+		"-E",
+		"--regexp-extended",
+		"-r",
+		"-z",
+		"--zero-terminated",
+		"--posix",
+	]);
+	if (quiet && flags.every((flag) => printingFlags.has(flag)))
+		return scripts.every((script) => script.split(";").every((part) => /^(?:\d+|\d+,\d+)?p$/.test(part.trim())));
+	const substitutionFlags = new Set(["-E", "--regexp-extended", "-r", "--posix"]);
+	if (hasFiles || scripts.length !== 1 || !flags.every((flag) => substitutionFlags.has(flag))) return false;
+	const script = scripts[0]?.trim() ?? "";
+	if (!script.startsWith("s/") || /[\r\n;{}]/.test(script)) return false;
+	if ([...script].some((character) => character.charCodeAt(0) === 0 || character.charCodeAt(0) > 127)) return false;
+	const comment = script.indexOf("#");
+	if (comment >= 0 && !(comment > 0 && script[comment - 1] === "s")) return false;
+	if (/s\\|\\[|#%@]|\d\s*~\s*\d|,\s*~\s*\d|\$\s*~\s*\d|[/\d$]!/.test(script)) return false;
+	if (!/^s\/[^/]*\/[^/]*\/[^/]*$/.test(script) || /\/[^/]*\s+[wWeE]/.test(script)) return false;
+	let delimiters = 0;
+	let lastDelimiter = -1;
+	for (let index = 2; index < script.length; index++) {
+		if (script[index] === "\\") {
+			index++;
+			continue;
+		}
+		if (script[index] === "/") {
+			delimiters++;
+			lastDelimiter = index;
+		}
+	}
+	return delimiters === 2 && /^[gpimIM]*[1-9]?[gpimIM]*$/.test(script.slice(lastDelimiter + 1));
 }
 
 function safePrintf(args: string[], unknownOperands = false): boolean {
@@ -1920,8 +1958,8 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 		return info;
 	}
 	if (name === "cd") {
-		if (args.length !== 1) return null;
-		intents.push(path(args[0] ?? "", "argument", "cwd"));
+		if (args.length > 1) return null;
+		if (args[0] !== undefined) intents.push(path(args[0], "argument", "cwd"));
 		return { ...info, hasGlob: command.hasGlob };
 	}
 	if (name === "python" || name === "python3") return args.length === 1 && args[0] === "--version" ? info : null;
@@ -1932,7 +1970,7 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 	if (name === "arch")
 		return args.length === 0 || (args.length === 1 && ["-h", "--help"].includes(args[0] ?? "")) ? info : null;
 	if (name === "ifconfig")
-		return args.length === 0 || (args.length === 1 && /^[a-zA-Z][a-zA-Z0-9_-]*$/.test(args[0] ?? "")) ? info : null;
+		return args.length === 0 || (args.length === 1 && /^[a-zA-Z]/.test(args[0] ?? "")) ? info : null;
 	if (name === "printf") return safePrintf(args) ? info : null;
 	if (name === "date") {
 		const parsed = parseOptions(args, DATE_OPTIONS);
@@ -2080,7 +2118,31 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 			"-S": "string",
 			"-s": "string",
 		});
-		if (!parsed || parsed.positionals.some((value) => /[/\\~]/.test(value))) return null;
+		if (!parsed) return null;
+		const searchOptions = new Set(["-k", "-f", "--apropos", "--whatis"]);
+		const sectionOptions = new Set(["-S", "-s"]);
+		const separator = args.indexOf("--");
+		const optionArgs = separator < 0 ? args : args.slice(0, separator);
+		const searchRequested = optionArgs.some((value) =>
+			value.startsWith("--") ? searchOptions.has(value) : value.startsWith("-") && /[kf]/.test(value.slice(1)),
+		);
+		let searchSeen = false;
+		let operands = false;
+		for (let index = 0; index < args.length; index++) {
+			const value = args[index] ?? "";
+			if (!operands && value === "--") {
+				operands = true;
+				continue;
+			}
+			if (!operands && value.startsWith("-") && value !== "-") {
+				if (searchOptions.has(value)) searchSeen = true;
+				else if (sectionOptions.has(value)) index++;
+				continue;
+			}
+			operands = true;
+			if (searchRequested && value.startsWith("-")) return null;
+			if (!searchSeen && /[/\\~]/.test(value)) return null;
+		}
 		return info;
 	}
 	if (name === "help") {
@@ -2089,7 +2151,10 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 		return info;
 	}
 	if (name === "test" || name === "[" || name === "[[") {
-		if (args.some((value) => ["-v", "-R", "-a", "-o"].includes(value) || value.includes("["))) return null;
+		if (args.some((value) => ["-a", "-o"].includes(value) || value.includes("["))) return null;
+		for (let index = 0; index < args.length; index++) {
+			if (["-v", "-R"].includes(args[index] ?? "") && !/^[A-Za-z_]\w*$/.test(args[index + 1] ?? "")) return null;
+		}
 		const fileOperators = new Set([
 			"-b",
 			"-c",
@@ -2170,18 +2235,12 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 	if (["grep", "egrep", "fgrep", "rg"].includes(name)) {
 		const parsed = parseOptions(args, name === "rg" ? RG_OPTIONS : GREP_OPTIONS);
 		if (!parsed) return null;
-		if (
-			name === "rg" &&
-			optionValues(parsed, ["-g", "--glob"]).some((value) => value.startsWith("/") || value.split("/").includes(".."))
-		)
-			return null;
 		const patternOptions = optionValues(
 			parsed,
 			name === "rg" ? ["-e", "--regexp", "-f"] : ["-e", "--regexp", "-f", "--file"],
 		);
 		const patternFromOption = patternOptions.length > 0;
 		const files = patternFromOption ? parsed.positionals : parsed.positionals.slice(1);
-		if (name === "rg" && files.length === 0) return null;
 		intents.push(...files.map((value) => path(value, "argument")));
 		intents.push(...optionValues(parsed, ["-f", "--file", "--exclude-from"]).map((value) => path(value, "option")));
 		return info;
@@ -2199,8 +2258,8 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 		const quiet =
 			parsed.occurrences.has("-n") || parsed.occurrences.has("--quiet") || parsed.occurrences.has("--silent");
 		const effectiveScripts = scripts.length > 0 ? scripts : parsed.positionals.slice(0, 1);
-		if (effectiveScripts.length === 0 || effectiveScripts.some((script) => !safeSedScript(script, quiet))) return null;
 		const files = scripts.length > 0 ? parsed.positionals : parsed.positionals.slice(1);
+		if (!safeSedScripts(effectiveScripts, parsed, quiet, files.length > 0)) return null;
 		intents.push(...files.map((value) => path(value, "argument")));
 		return info;
 	}
@@ -2211,7 +2270,30 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 		return info;
 	}
 	if (name === "uniq") {
-		if (args.some((value) => !value.startsWith("-") && !/^\d+$/.test(value))) return null;
+		const parsed = parseOptions(args, {
+			"-c": "none",
+			"--count": "none",
+			"-d": "none",
+			"--repeated": "none",
+			"-D": "none",
+			"--all-repeated": "none",
+			"-i": "none",
+			"--ignore-case": "none",
+			"-u": "none",
+			"--unique": "none",
+			"-z": "none",
+			"--zero-terminated": "none",
+			"-f": "number",
+			"--skip-fields": "number",
+			"-s": "number",
+			"--skip-chars": "number",
+			"-w": "number",
+			"--check-chars": "number",
+			"--help": "none",
+			"--version": "none",
+		});
+		if (!parsed || parsed.positionals.length > 1) return null;
+		intents.push(...parsed.positionals.map((value) => path(value, "argument")));
 		return info;
 	}
 	if (name === "jq") {
@@ -2378,11 +2460,5 @@ export function classifyReadOnlyBash(command: string, options: BashClassifierOpt
 		if (!classified) return fail(`Command is not read-only: ${candidate.argv.join(" ")}`, commands);
 		commands.push(classified);
 	}
-	if (
-		commands.length > 1 &&
-		commands.some((entry) => entry.name === "cd") &&
-		!compoundCdHasDeterministicCwd(tree.rootNode)
-	)
-		return fail("Compound cd is allowed only in a deterministic && chain", commands);
 	return { readOnly: true, reason: "All commands are read-only", commands };
 }

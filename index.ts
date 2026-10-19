@@ -1362,14 +1362,26 @@ function cancelIdleTimer(state: RuntimeState): void {
 
 function scheduleIdle(ctx: ExtensionContext, state: RuntimeState): void {
 	if (state.config.extraction.idleFlushSeconds === 0 || state.idleTimer || state.shuttingDown) return;
-	state.idleTimer = setTimeout(() => {
-		state.idleTimer = undefined;
-		if (!state.shuttingDown && ctx.isIdle())
-			void trackExtractionPreparation(state, () => scheduleExtraction(ctx, state, "idle")).catch((error) =>
-				notifyError(ctx, "memory idle extraction", error),
-			);
-	}, state.config.extraction.idleFlushSeconds * 1000);
-	state.idleTimer.unref();
+	const deadline = Date.now() + state.config.extraction.idleFlushSeconds * 1000;
+	const arm = () => {
+		state.idleTimer = setTimeout(
+			() => {
+				state.idleTimer = undefined;
+				if (state.shuttingDown) return;
+				if (Date.now() < deadline) {
+					arm();
+					return;
+				}
+				if (ctx.isIdle())
+					void trackExtractionPreparation(state, () => scheduleExtraction(ctx, state, "idle")).catch((error) =>
+						notifyError(ctx, "memory idle extraction", error),
+					);
+			},
+			Math.min(2_147_483_647, Math.max(1, deadline - Date.now())),
+		);
+		state.idleTimer.unref();
+	};
+	arm();
 }
 
 function monitorOperationValidity(

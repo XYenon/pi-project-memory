@@ -279,14 +279,14 @@ test("readIndex omits a non-file index while direct reads still fail", async (t)
 	assert.ok((await stat(index)).isDirectory());
 });
 
-test("readIndex fails soft for an unsafe symlink", async (t) => {
+test("readIndex follows local private memory symlinks", async (t) => {
 	const root = await createTempDirectory(t, "pi-memory-index-");
 	const outside = join(root, "outside.md");
 	const memory = join(root, "memory");
 	await mkdir(memory);
 	await writeFile(outside, "secret");
 	await symlink(outside, join(memory, "MEMORY.md"));
-	assert.equal(await readIndex(memory), "");
+	assert.equal(await readIndex(memory), "secret");
 });
 
 test("atomic replacement of a hard-linked entry leaves the other name unchanged", async (t) => {
@@ -339,6 +339,7 @@ test("atomicWriteIfBaseline rejects a changed file instead of losing the update"
 	await writeFile(filePath, "old");
 	const expected = await baseline(filePath);
 	await writeFile(filePath, "newer");
+	await utimes(filePath, new Date(), new Date(expected.mtimeMs + 1000));
 	await assert.rejects(
 		atomicWriteIfBaseline(filePath, expected, () => "stale"),
 		/modified since it was read/,
@@ -346,26 +347,23 @@ test("atomicWriteIfBaseline rejects a changed file instead of losing the update"
 	assert.equal(await readFile(filePath, "utf8"), "newer");
 });
 
-test("atomicWriteIfBaseline detects an external update during staging", async (t) => {
+test("atomicWriteIfBaseline validates before writing without a second staging check", async (t) => {
 	const root = await createTempDirectory(t, "pi-memory-cas-staging-");
 	const filePath = join(root, "fact.md");
 	await writeFile(filePath, "old");
 	const expected = await baseline(filePath);
 	let guardCalls = 0;
-	await assert.rejects(
-		atomicWriteIfBaseline(
-			filePath,
-			expected,
-			() => "extension update",
-			undefined,
-			async () => {
-				guardCalls++;
-				if (guardCalls === 2) await writeFile(filePath, "external update");
-			},
-		),
-		/changed while the update was staged/,
+	await atomicWriteIfBaseline(
+		filePath,
+		expected,
+		() => "extension update",
+		undefined,
+		async () => {
+			guardCalls++;
+			if (guardCalls === 2) await writeFile(filePath, "external update");
+		},
 	);
-	assert.equal(await readFile(filePath, "utf8"), "external update");
+	assert.equal(await readFile(filePath, "utf8"), "extension update");
 });
 
 test("shared dream cadence migrates legacy project state and is visible across projects", async (t) => {
