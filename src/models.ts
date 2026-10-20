@@ -28,6 +28,10 @@ import type {
 	RoleModelConfig,
 } from "./types.ts";
 
+export function modelReference(model: Pick<Model<Api>, "provider" | "id">): string {
+	return `${model.provider}/${model.id}`;
+}
+
 export function resolveRoleModel(role: MemoryRole, roleConfig: RoleModelConfig, ctx: ExtensionContext): Model<Api> {
 	if (roleConfig.model === "inherit") {
 		if (!ctx.model) throw new Error(`No active model is available for the ${role} role`);
@@ -671,7 +675,7 @@ export async function runChildAgent(options: {
 		}
 		return {
 			role,
-			model: `${model.provider}/${model.id}`,
+			model: modelReference(model),
 			turns,
 			text: last ? responseText(last) : "",
 			touchedPaths: [...touchedPaths].sort(),

@@ -7,6 +7,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
+	type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import type { ChildCodemodeOptions } from "./src/child-codemode.ts";
 import { configPath, loadConfig } from "./src/config.ts";
@@ -16,6 +17,7 @@ import {
 	addUsage,
 	effectiveThinkingLevel,
 	emptyUsage,
+	modelReference,
 	type ParentMemoryContext,
 	resolveRoleModel,
 	runChildAgent,
@@ -31,6 +33,7 @@ import {
 	mainMemoryPrompt,
 	recalledMemoriesPrompt,
 	recalledMemoryBudgetContent,
+	staleMemoryWarning,
 } from "./src/prompts.ts";
 import { sanitizeMemoryText } from "./src/sanitize.ts";
 import {
@@ -50,7 +53,7 @@ import {
 	snapshotMarkdown,
 	snapshotMarkdownFile,
 } from "./src/store.ts";
-import type { ChildRunResult, ProjectMemoryConfig, ProjectPaths, RecallItem } from "./src/types.ts";
+import type { ChildRunResult, MemoryRole, ProjectMemoryConfig, ProjectPaths, RecallItem } from "./src/types.ts";
 import { type MemoryModelView, type MemoryPanelData, openMemoryPanel } from "./src/ui.ts";
 
 const RECALL_MESSAGE = "pi-project-memory-recall";
@@ -536,13 +539,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 			}
 			if (unchangedDuringRead) {
 				const reminder = staleMemoryToolReminder(currentSnapshot.mtimeMs);
-				if (reminder) {
-					return {
-						content: [{ type: "text", text: `${reminder}\n${resultText}` }],
-						details: event.details,
-						...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }),
-					};
-				}
+				if (reminder) return replaceToolResultText(event, `${reminder}\n${resultText}`);
 			}
 			return;
 		}
@@ -558,11 +555,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 			if (warnings.length > 0) {
 				const reminder = `<system-reminder source="project-memory-lint">\nThe memory write succeeded, but it needs correction:\n${warnings.map((value) => `- ${value}`).join("\n")}\n</system-reminder>`;
 				const existing = event.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
-				return {
-					content: [{ type: "text", text: `${existing}\n\n${reminder}` }],
-					details: event.details,
-					...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }),
-				};
+				return replaceToolResultText(event, `${existing}\n\n${reminder}`);
 			}
 		} catch {}
 	});
@@ -1156,20 +1149,14 @@ async function scheduleExtraction(
 	}
 	identity.lockIsValid = release.isValid;
 	try {
+		const abandoned = () =>
+			state.shutdownTimedOut ||
+			(state.shuttingDown && trigger !== "shutdown") ||
+			!operationIsCurrent(state, ctx, identity);
 		await release.assertValid();
-		if (
-			state.shutdownTimedOut ||
-			(state.shuttingDown && trigger !== "shutdown") ||
-			!operationIsCurrent(state, ctx, identity)
-		)
-			return "failed";
+		if (abandoned()) return "failed";
 		const topics = await scanTopics(paths.memoryDir);
-		if (
-			state.shutdownTimedOut ||
-			(state.shuttingDown && trigger !== "shutdown") ||
-			!operationIsCurrent(state, ctx, identity)
-		)
-			return "failed";
+		if (abandoned()) return "failed";
 		const recentLimit =
 			state.config.extraction.recentMessages === "inherit"
 				? Number.MAX_SAFE_INTEGER
@@ -1539,6 +1526,14 @@ function updateMessage(update: MemoryUpdateMessage) {
 	};
 }
 
+function replaceToolResultText(event: ToolResultEvent, text: string) {
+	return {
+		content: [{ type: "text" as const, text }],
+		details: event.details,
+		...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }),
+	};
+}
+
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -1555,10 +1550,8 @@ function recalledMemoryChargedContent(item: RecallItem): string {
 }
 
 function staleMemoryToolReminder(mtimeMs: number): string {
-	const days = Math.max(0, Math.floor((Date.now() - mtimeMs) / 86_400_000));
-	return days <= 1
-		? ""
-		: `<system-reminder>\nThis memory is ${days} days old. Memories are point-in-time observations, not live state — claims about code behavior or file:line citations may be outdated. Verify against current code before asserting as fact.\n</system-reminder>`;
+	const warning = staleMemoryWarning(mtimeMs);
+	return warning ? `<system-reminder>\n${warning}\n</system-reminder>` : "";
 }
 
 function updateMaintenanceStatus(ctx: ExtensionContext, state: RuntimeState): void {
@@ -1598,7 +1591,7 @@ function memoryModelViews(state: RuntimeState, ctx: ExtensionContext): MemoryMod
 						: "Idle / automatic";
 		const view: MemoryModelView = {
 			role,
-			model: configured.model === "inherit" && ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : configured.model,
+			model: configured.model === "inherit" && ctx.model ? modelReference(ctx.model) : configured.model,
 			inherited: configured.model === "inherit",
 			thinking: "Not resolved",
 			maxTokens: configured.maxTokens,
@@ -1615,7 +1608,7 @@ function memoryModelViews(state: RuntimeState, ctx: ExtensionContext): MemoryMod
 		};
 		try {
 			const model = resolveRoleModel(role, configured, ctx);
-			view.model = `${model.provider}/${model.id}`;
+			view.model = modelReference(model);
 			const thinking = effectiveThinkingLevel(model, configured.thinkingLevel, ctx.thinkingLevel);
 			view.thinking =
 				configured.thinkingLevel === "inherit"
@@ -1631,12 +1624,12 @@ function memoryModelViews(state: RuntimeState, ctx: ExtensionContext): MemoryMod
 }
 
 function memoryStatusLines(state: RuntimeState, ctx: ExtensionContext, topicCount: number): string[] {
-	const modelStatus = (role: "selector" | "extractor" | "dream") => {
+	const modelStatus = (role: MemoryRole) => {
 		const configured = state.config.models[role];
 		try {
 			const model = resolveRoleModel(role, configured, ctx);
 			const thinking = effectiveThinkingLevel(model, configured.thinkingLevel, ctx.thinkingLevel);
-			return `${formatModel(configured.model, ctx)} [available: ${model.provider}/${model.id}; thinking ${configured.thinkingLevel} → ${thinking}; maxTokens ${configured.maxTokens}]`;
+			return `${formatModel(configured.model, ctx)} [available: ${modelReference(model)}; thinking ${configured.thinkingLevel} → ${thinking}; maxTokens ${configured.maxTokens}]`;
 		} catch (error) {
 			return `${formatModel(configured.model, ctx)} [unavailable: ${errorMessage(error)}]`;
 		}
@@ -1665,7 +1658,7 @@ function formatUsage(usage: Usage): string {
 function formatModel(model: string, ctx: ExtensionContext): string {
 	if (model !== "inherit") return model;
 	if (!ctx.model) return "inherit (no active model)";
-	return `inherit (${ctx.model.provider}/${ctx.model.id})`;
+	return `inherit (${modelReference(ctx.model)})`;
 }
 
 async function waitWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {

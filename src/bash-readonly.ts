@@ -1279,6 +1279,74 @@ const AKI_OPTIONS: OptionSpec = {
 
 const WRAPPERS = new Set(["command", "builtin", "noglob", "time", "nohup", "timeout", "nice", "stdbuf", "env"]);
 
+const TPUT_MUTATING_CAPABILITIES = new Set([
+	"init",
+	"reset",
+	"rs1",
+	"rs2",
+	"rs3",
+	"is1",
+	"is2",
+	"is3",
+	"iprog",
+	"if",
+	"rf",
+	"clear",
+	"flash",
+	"mc0",
+	"mc4",
+	"mc5",
+	"mc5i",
+	"mc5p",
+	"pfkey",
+	"pfloc",
+	"pfx",
+	"pfxl",
+	"smcup",
+	"rmcup",
+]);
+const MAN_SEARCH_OPTIONS = new Set(["-k", "-f", "--apropos", "--whatis"]);
+const MAN_SECTION_OPTIONS = new Set(["-S", "-s"]);
+const TEST_FILE_OPERATORS = new Set([
+	"-b",
+	"-c",
+	"-d",
+	"-e",
+	"-f",
+	"-g",
+	"-h",
+	"-k",
+	"-L",
+	"-N",
+	"-O",
+	"-p",
+	"-r",
+	"-s",
+	"-S",
+	"-u",
+	"-w",
+	"-x",
+	"-nt",
+	"-ot",
+	"-ef",
+]);
+const NON_PATH_DIRECT_COMMANDS = new Set([
+	"id",
+	"uname",
+	"free",
+	"locale",
+	"groups",
+	"nproc",
+	"true",
+	"false",
+	"sleep",
+	"which",
+	"type",
+	"expr",
+	"seq",
+	"cal",
+]);
+
 function fail(reason: string, commands: BashCommandInfo[] = []): BashReadOnlyDecision {
 	return { readOnly: false, reason, commands };
 }
@@ -1292,21 +1360,18 @@ function containsBackgroundOperator(node: Parser.SyntaxNode): boolean {
 	return node.children.some(containsBackgroundOperator);
 }
 
+const DYNAMIC_VALUE_NODE_TYPES = new Set([
+	"command_substitution",
+	"process_substitution",
+	"simple_expansion",
+	"expansion",
+	"arithmetic_expansion",
+	"brace_expression",
+]);
+const ARGUMENT_NODE_TYPES = new Set(["command_name", "word", "number", "raw_string", "string", "concatenation"]);
+
 function staticValue(node: Parser.SyntaxNode): string | null {
-	if (
-		containsType(
-			node,
-			new Set([
-				"command_substitution",
-				"process_substitution",
-				"simple_expansion",
-				"expansion",
-				"arithmetic_expansion",
-				"brace_expression",
-			]),
-		)
-	)
-		return null;
+	if (containsType(node, DYNAMIC_VALUE_NODE_TYPES)) return null;
 	const raw = node.text;
 	if (node.type === "ansi_c_string" || node.type === "translated_string") return null;
 	if (node.type === "command_name" || node.type === "concatenation") {
@@ -1372,7 +1437,7 @@ function normalizeCommand(node: Parser.SyntaxNode): NormalizedCommand | null {
 			env[parsed.name] = parsed.value;
 			continue;
 		}
-		if (["command_name", "word", "number", "raw_string", "string", "concatenation"].includes(child.type)) {
+		if (ARGUMENT_NODE_TYPES.has(child.type)) {
 			const value = staticValue(child);
 			if (value === null) return null;
 			const gap =
@@ -1400,29 +1465,29 @@ export function parseStaticBashCommand(command: string): string[] | null {
 	const nodes = tree.rootNode.namedChildren.filter((node) => node.type !== "comment");
 	if (nodes.length !== 1 || nodes[0]?.type !== "command") return null;
 	const node = nodes[0];
-	const argumentTypes = new Set(["command_name", "word", "number", "raw_string", "string", "concatenation"]);
-	if (node.namedChildren.some((child) => !argumentTypes.has(child.type))) return null;
+	if (node.namedChildren.some((child) => !ARGUMENT_NODE_TYPES.has(child.type))) return null;
 	return normalizeCommand(node)?.argv ?? null;
 }
 
+const UNSUPPORTED_SHELL_NODE_TYPES = new Set([
+	"subshell",
+	"compound_statement",
+	"function_definition",
+	"command_substitution",
+	"simple_expansion",
+	"expansion",
+	"arithmetic_expansion",
+	"process_substitution",
+	"if_statement",
+	"while_statement",
+	"until_statement",
+	"for_statement",
+	"c_style_for_statement",
+	"case_statement",
+]);
+
 function collectCommands(root: Parser.SyntaxNode): NormalizedCommand[] | null {
-	const rejected = new Set([
-		"subshell",
-		"compound_statement",
-		"function_definition",
-		"command_substitution",
-		"simple_expansion",
-		"expansion",
-		"arithmetic_expansion",
-		"process_substitution",
-		"if_statement",
-		"while_statement",
-		"until_statement",
-		"for_statement",
-		"c_style_for_statement",
-		"case_statement",
-	]);
-	if (root.hasError || containsType(root, rejected)) return null;
+	if (root.hasError || containsType(root, UNSUPPORTED_SHELL_NODE_TYPES)) return null;
 	const commands: NormalizedCommand[] = [];
 	const visit = (node: Parser.SyntaxNode, inheritedRedirects: NormalizedCommand["redirects"] = []): boolean => {
 		if (node.type === "redirected_statement") {
@@ -1690,24 +1755,25 @@ function dangerousGhArgument(value: string): boolean {
 	return (value.match(/\//g) ?? []).length >= 2;
 }
 
+const SED_PRINTING_FLAGS = new Set([
+	"-n",
+	"--quiet",
+	"--silent",
+	"-E",
+	"--regexp-extended",
+	"-r",
+	"-z",
+	"--zero-terminated",
+	"--posix",
+]);
+const SED_SUBSTITUTION_FLAGS = new Set(["-E", "--regexp-extended", "-r", "--posix"]);
+
 function safeSedScripts(scripts: string[], parsed: ParsedOptions, quiet: boolean, hasFiles: boolean): boolean {
 	if (scripts.length === 0) return false;
 	const flags = [...parsed.occurrences.keys()];
-	const printingFlags = new Set([
-		"-n",
-		"--quiet",
-		"--silent",
-		"-E",
-		"--regexp-extended",
-		"-r",
-		"-z",
-		"--zero-terminated",
-		"--posix",
-	]);
-	if (quiet && flags.every((flag) => printingFlags.has(flag)))
+	if (quiet && flags.every((flag) => SED_PRINTING_FLAGS.has(flag)))
 		return scripts.every((script) => script.split(";").every((part) => /^(?:\d+|\d+,\d+)?p$/.test(part.trim())));
-	const substitutionFlags = new Set(["-E", "--regexp-extended", "-r", "--posix"]);
-	if (hasFiles || scripts.length !== 1 || !flags.every((flag) => substitutionFlags.has(flag))) return false;
+	if (hasFiles || scripts.length !== 1 || !flags.every((flag) => SED_SUBSTITUTION_FLAGS.has(flag))) return false;
 	const script = scripts[0]?.trim() ?? "";
 	if (!script.startsWith("s/") || /[\r\n;{}]/.test(script)) return false;
 	if ([...script].some((character) => character.charCodeAt(0) === 0 || character.charCodeAt(0) > 127)) return false;
@@ -1749,6 +1815,30 @@ function safePrintf(args: string[], unknownOperands = false): boolean {
 		.every((value) => !value.includes("[") && !value.includes("`") && !value.includes("$(") && numeric.test(value));
 }
 
+const PASSIVE_GIT_SUBCOMMANDS = new Set([
+	"diff",
+	"log",
+	"show",
+	"shortlog",
+	"status",
+	"blame",
+	"ls-files",
+	"merge-base",
+	"rev-parse",
+	"rev-list",
+	"describe",
+	"cat-file",
+	"for-each-ref",
+	"grep",
+	"show-ref",
+	"name-rev",
+	"ls-tree",
+]);
+
+function gitResult(ok: boolean): { ok: boolean; positionals: string[]; paths: BashPathIntent[] } {
+	return { ok, positionals: [], paths: [] };
+}
+
 function classifyGit(argv: string[]): { ok: boolean; positionals: string[]; paths: BashPathIntent[] } {
 	const sub = argv[1];
 	if (
@@ -1768,33 +1858,14 @@ function classifyGit(argv: string[]): { ok: boolean; positionals: string[]; path
 					/signature/i.test(value),
 			)
 	)
-		return { ok: false, positionals: [], paths: [] };
-	const passive = new Set([
-		"diff",
-		"log",
-		"show",
-		"shortlog",
-		"status",
-		"blame",
-		"ls-files",
-		"merge-base",
-		"rev-parse",
-		"rev-list",
-		"describe",
-		"cat-file",
-		"for-each-ref",
-		"grep",
-		"show-ref",
-		"name-rev",
-		"ls-tree",
-	]);
-	if (passive.has(sub)) {
+		return gitResult(false);
+	if (PASSIVE_GIT_SUBCOMMANDS.has(sub)) {
 		const paths: BashPathIntent[] = [];
 		for (let index = 2; index < argv.length; index++) {
 			const value = argv[index] ?? "";
 			if (["-O", "--order-file", "--exclude-from"].includes(value)) {
 				const operand = argv[++index];
-				if (!operand) return { ok: false, positionals: [], paths: [] };
+				if (!operand) return gitResult(false);
 				paths.push(path(operand, "option"));
 			} else if (value.startsWith("--order-file=") || value.startsWith("--exclude-from="))
 				paths.push(path(value.slice(value.indexOf("=") + 1), "option"));
@@ -1829,25 +1900,17 @@ function classifyGit(argv: string[]): { ok: boolean; positionals: string[]; path
 			"--show-origin": "none",
 			"--show-scope": "none",
 		});
-		return { ok: !!parsed && parsed.positionals.length === 1, positionals: [], paths: [] };
+		return gitResult(!!parsed && parsed.positionals.length === 1);
 	}
 	if (sub === "remote") {
 		if (argv[2] === "show")
-			return {
-				ok: argv.includes("-n") && argv.filter((value) => !value.startsWith("-")).length === 4,
-				positionals: [],
-				paths: [],
-			};
-		return { ok: argv.slice(2).every((value) => value === "-v" || value === "--verbose"), positionals: [], paths: [] };
+			return gitResult(argv.includes("-n") && argv.filter((value) => !value.startsWith("-")).length === 4);
+		return gitResult(argv.slice(2).every((value) => value === "-v" || value === "--verbose"));
 	}
 	if (sub === "reflog")
-		return {
-			ok: !argv.slice(2).some((value) => ["expire", "delete", "drop", "write"].includes(value)),
-			positionals: [],
-			paths: [],
-		};
-	if (sub === "stash") return { ok: argv[2] === "list" || argv[2] === "show", positionals: [], paths: [] };
-	if (sub === "worktree") return { ok: argv[2] === "list", positionals: [], paths: [] };
+		return gitResult(!argv.slice(2).some((value) => ["expire", "delete", "drop", "write"].includes(value)));
+	if (sub === "stash") return gitResult(argv[2] === "list" || argv[2] === "show");
+	if (sub === "worktree") return gitResult(argv[2] === "list");
 	if (sub === "tag" || sub === "branch") {
 		const shared: OptionSpec = {
 			"-l": "none",
@@ -1883,21 +1946,16 @@ function classifyGit(argv: string[]): { ok: boolean; positionals: string[]; path
 						"--show-current": "none",
 					},
 		);
-		if (!parsed) return { ok: false, positionals: [], paths: [] };
+		if (!parsed) return gitResult(false);
 		const lists = parsed.occurrences.has("-l") || parsed.occurrences.has("--list");
 		const merged = parsed.occurrences.has("--merged") || parsed.occurrences.has("--no-merged");
 		const unsafeFormat = optionValues(parsed, ["--format", "--sort"]).some(
 			(value) => value.includes("%") || value.includes("$") || value.includes("`"),
 		);
-		return {
-			ok: !unsafeFormat && (parsed.positionals.length === 0 || lists || (sub === "branch" && merged)),
-			positionals: [],
-			paths: [],
-		};
+		return gitResult(!unsafeFormat && (parsed.positionals.length === 0 || lists || (sub === "branch" && merged)));
 	}
 	if (sub === "ls-remote") {
-		if (argv.some((value) => value.startsWith("--server-option") || value === "-o"))
-			return { ok: false, positionals: [], paths: [] };
+		if (argv.some((value) => value.startsWith("--server-option") || value === "-o")) return gitResult(false);
 		const parsed = parseOptions(argv.slice(2), {
 			"--branches": "none",
 			"-b": "none",
@@ -1913,9 +1971,9 @@ function classifyGit(argv: string[]): { ok: boolean; positionals: string[]; path
 			"--symref": "none",
 			"--sort": "string",
 		});
-		return { ok: !!parsed && parsed.positionals.length === 0, positionals: [], paths: [] };
+		return gitResult(!!parsed && parsed.positionals.length === 0);
 	}
-	return { ok: false, positionals: [], paths: [] };
+	return gitResult(false);
 }
 
 function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform): BashCommandInfo | null {
@@ -2046,33 +2104,11 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 	}
 	if (name === "tput") {
 		const parsed = parseOptions(args, TPUT_OPTIONS);
-		const mutating = new Set([
-			"init",
-			"reset",
-			"rs1",
-			"rs2",
-			"rs3",
-			"is1",
-			"is2",
-			"is3",
-			"iprog",
-			"if",
-			"rf",
-			"clear",
-			"flash",
-			"mc0",
-			"mc4",
-			"mc5",
-			"mc5i",
-			"mc5p",
-			"pfkey",
-			"pfloc",
-			"pfx",
-			"pfxl",
-			"smcup",
-			"rmcup",
-		]);
-		if (!parsed || parsed.positionals.length === 0 || parsed.positionals.some((value) => mutating.has(value)))
+		if (
+			!parsed ||
+			parsed.positionals.length === 0 ||
+			parsed.positionals.some((value) => TPUT_MUTATING_CAPABILITIES.has(value))
+		)
 			return null;
 		return info;
 	}
@@ -2119,12 +2155,10 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 			"-s": "string",
 		});
 		if (!parsed) return null;
-		const searchOptions = new Set(["-k", "-f", "--apropos", "--whatis"]);
-		const sectionOptions = new Set(["-S", "-s"]);
 		const separator = args.indexOf("--");
 		const optionArgs = separator < 0 ? args : args.slice(0, separator);
 		const searchRequested = optionArgs.some((value) =>
-			value.startsWith("--") ? searchOptions.has(value) : value.startsWith("-") && /[kf]/.test(value.slice(1)),
+			value.startsWith("--") ? MAN_SEARCH_OPTIONS.has(value) : value.startsWith("-") && /[kf]/.test(value.slice(1)),
 		);
 		let searchSeen = false;
 		let operands = false;
@@ -2135,8 +2169,8 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 				continue;
 			}
 			if (!operands && value.startsWith("-") && value !== "-") {
-				if (searchOptions.has(value)) searchSeen = true;
-				else if (sectionOptions.has(value)) index++;
+				if (MAN_SEARCH_OPTIONS.has(value)) searchSeen = true;
+				else if (MAN_SECTION_OPTIONS.has(value)) index++;
 				continue;
 			}
 			operands = true;
@@ -2155,32 +2189,9 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 		for (let index = 0; index < args.length; index++) {
 			if (["-v", "-R"].includes(args[index] ?? "") && !/^[A-Za-z_]\w*$/.test(args[index + 1] ?? "")) return null;
 		}
-		const fileOperators = new Set([
-			"-b",
-			"-c",
-			"-d",
-			"-e",
-			"-f",
-			"-g",
-			"-h",
-			"-k",
-			"-L",
-			"-N",
-			"-O",
-			"-p",
-			"-r",
-			"-s",
-			"-S",
-			"-u",
-			"-w",
-			"-x",
-			"-nt",
-			"-ot",
-			"-ef",
-		]);
 		for (let index = 0; index < args.length; index++) {
 			const operator = args[index] ?? "";
-			if (!fileOperators.has(operator)) continue;
+			if (!TEST_FILE_OPERATORS.has(operator)) continue;
 			if (["-nt", "-ot", "-ef"].includes(operator) && args[index - 1])
 				intents.push(path(args[index - 1] ?? "", "argument"));
 			if (args[index + 1]) intents.push(path(args[index + 1] ?? "", "argument"));
@@ -2420,23 +2431,7 @@ function classifyCommand(command: NormalizedCommand, platform: NodeJS.Platform):
 		return info;
 	}
 	if (DIRECT_COMMANDS.has(name)) {
-		const nonPath = new Set([
-			"id",
-			"uname",
-			"free",
-			"locale",
-			"groups",
-			"nproc",
-			"true",
-			"false",
-			"sleep",
-			"which",
-			"type",
-			"expr",
-			"seq",
-			"cal",
-		]);
-		if (!nonPath.has(name))
+		if (!NON_PATH_DIRECT_COMMANDS.has(name))
 			intents.push(...args.filter((value) => !value.startsWith("-")).map((value) => path(value, "argument")));
 		return info;
 	}

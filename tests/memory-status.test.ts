@@ -65,7 +65,7 @@ test("memory activity animates in the bottom border without adding rows or chang
 	const active = editor.render(80);
 	assert.equal(active.length, idle.length);
 	assert.equal(active[0], idle[0]);
-	assert.match(stripTerminalSequences(h.border()), /⠋ Memory: Extracting ─$/);
+	assert.match(stripTerminalSequences(h.border()), /⠋ Memory: Extracting ──$/);
 	assert.equal(visibleWidth(h.border()), 80);
 	assert.equal(editor.getText(), "keep this input 中文");
 

@@ -322,7 +322,10 @@ export class MemoryPanel {
 				model.maxTokens === "inherit" ? "Provider default" : `${model.maxTokens.toLocaleString("en-US")} tokens`,
 			);
 			if (model.outputMode) field("Output mode", model.outputMode);
-			field("Activity", this.runningAction === model.role.replace("extractor", "extract") ? "Running" : model.activity);
+			field(
+				"Activity",
+				this.runningAction === (model.role === "extractor" ? "extract" : model.role) ? "Running" : model.activity,
+			);
 			if (model.availabilityError) field("Unavailable", model.availabilityError, true);
 			if (model.lastError) field("Last error", model.lastError, true);
 			lines.push("");
@@ -353,9 +356,10 @@ export class MemoryPanel {
 				: undefined;
 		this.bodyHeight = Math.max(4, Math.min(24, this.terminalRows() - 9 - (result ? 1 : 0)));
 		const muted = (text: string) => this.theme.fg("muted", text);
+		const rule = this.theme.fg("border", "─".repeat(innerWidth));
 		const enabled = this.data.enabled ? this.theme.fg("success", "Enabled") : this.theme.fg("warning", "Disabled");
 		const header = [
-			this.theme.fg("border", "─".repeat(innerWidth)),
+			rule,
 			`${this.theme.fg("accent", this.theme.bold("Project memory"))}  ${enabled}`,
 			muted(singleLine(this.data.project)),
 			"",
@@ -417,7 +421,7 @@ export class MemoryPanel {
 		while (content.length < header.length + this.bodyHeight - (scrollInfo ? 1 : 0)) content.push("");
 		if (result) content.push(result);
 		if (scrollInfo) content.push(scrollInfo);
-		content.push(this.theme.fg("dim", hint), this.theme.fg("border", "─".repeat(innerWidth)));
+		content.push(this.theme.fg("dim", hint), rule);
 		return content.map((line) => truncateToWidth(` ${line}`, Math.max(1, width), "…"));
 	}
 

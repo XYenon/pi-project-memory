@@ -273,19 +273,20 @@ function isInitialTagFiller(character: string): boolean {
 	);
 }
 
+function skipInitialTagFiller(characters: string[], start: number): number {
+	let cursor = start;
+	while (cursor < characters.length) {
+		const character = characters[cursor];
+		if (character === undefined || !isInitialTagFiller(character)) break;
+		cursor++;
+	}
+	return cursor;
+}
+
 function reservedTagAt(characters: string[], start: number): boolean {
-	let cursor = start + 1;
-	while (cursor < characters.length) {
-		const character = characters[cursor];
-		if (character === undefined || !isInitialTagFiller(character)) break;
-		cursor++;
-	}
+	let cursor = skipInitialTagFiller(characters, start + 1);
 	if (SLASH_CONFUSABLES.has(characters[cursor] ?? "")) cursor++;
-	while (cursor < characters.length) {
-		const character = characters[cursor];
-		if (character === undefined || !isInitialTagFiller(character)) break;
-		cursor++;
-	}
+	cursor = skipInitialTagFiller(characters, cursor);
 
 	let tag = "";
 	for (; cursor < characters.length && tag.length <= 64; cursor++) {

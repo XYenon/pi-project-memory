@@ -179,11 +179,12 @@ export function selectorCatalogMessage(topics: MemoryTopic[]): string {
 	return topics.length > 0 ? sanitizeMemoryText(topicCatalog(topics)) : "(no local memory files)";
 }
 
-function staleMemoryNotice(mtimeMs: number): string {
+/** Warns that a memory older than one day may be stale; returns an empty string for fresh memories. */
+export function staleMemoryWarning(mtimeMs: number): string {
 	const days = Math.max(0, Math.floor((Date.now() - mtimeMs) / 86_400_000));
 	return days <= 1
 		? ""
-		: `This memory is ${days} days old. Memories are point-in-time observations, not live state — claims about code behavior or file:line citations may be outdated. Verify against current code before asserting as fact.\n\n`;
+		: `This memory is ${days} days old. Memories are point-in-time observations, not live state — claims about code behavior or file:line citations may be outdated. Verify against current code before asserting as fact.`;
 }
 
 export function recalledMemoryBudgetContent(item: RecallItem): string {
@@ -198,7 +199,8 @@ export function recalledMemoriesPrompt(items: RecallItem[]): string {
 			const truncation = item.truncated
 				? `\n\n> This memory file was truncated (${item.truncatedByBytes ? "4096 byte limit" : "first 200 lines"}). Use the read tool to view the complete file at: ${safePath}`
 				: "";
-			const memory = `${staleMemoryNotice(item.mtimeMs)}Memory: ${safePath}:\n\n${recalledMemoryBudgetContent(item)}${truncation}`;
+			const staleness = staleMemoryWarning(item.mtimeMs);
+			const memory = `${staleness ? `${staleness}\n\n` : ""}Memory: ${safePath}:\n\n${recalledMemoryBudgetContent(item)}${truncation}`;
 			return `<system-reminder>\n${index === 0 ? `${introduction}\n\n` : ""}${memory}\n</system-reminder>`;
 		})
 		.join("\n\n");

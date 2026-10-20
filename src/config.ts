@@ -76,11 +76,9 @@ function roleConfig(value: unknown, fallback: RoleModelConfig): RoleModelConfig 
 }
 
 function selectorConfig(value: unknown, fallback: SelectorModelConfig): SelectorModelConfig {
-	const raw = record(value);
-	if (!raw) return { ...fallback };
 	return {
-		...roleConfig(raw, fallback),
-		structuredOutput: boolean(raw.structuredOutput, fallback.structuredOutput),
+		...roleConfig(value, fallback),
+		structuredOutput: boolean(record(value)?.structuredOutput, fallback.structuredOutput),
 	};
 }
 

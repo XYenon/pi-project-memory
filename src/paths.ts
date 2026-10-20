@@ -241,19 +241,6 @@ export async function initializeProjectPaths(paths: ProjectPaths): Promise<void>
 		throw new Error("Project memory namespace belongs to a different project root");
 }
 
-export async function canonicalizeReadRoots(roots: readonly string[]): Promise<string[]> {
-	return Promise.all(
-		roots.map(async (root) => {
-			try {
-				return await realpath(root);
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code === "ENOENT") return resolve(root);
-				throw error;
-			}
-		}),
-	);
-}
-
 export function displayPath(path: string): string {
 	return path.startsWith(`${homedir()}${sep}`) ? `~${path.slice(homedir().length)}` : path;
 }
@@ -270,13 +257,4 @@ export function assertContainedMarkdown(root: string, candidate: string): string
 	if (!absolute.endsWith(".md"))
 		throw new Error(`Memory writes and deletes require a lowercase .md path: ${candidate}`);
 	return absolute;
-}
-
-export function relativeMemoryPath(root: string, absolute: string): string {
-	return (
-		absolute
-			.slice(resolve(root).length + 1)
-			.split(sep)
-			.join("/") || basename(absolute)
-	);
 }

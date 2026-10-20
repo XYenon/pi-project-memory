@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, type Dirent, type Stats } from "node:fs";
 import {
-	access,
 	copyFile,
 	link,
 	lstat,
@@ -34,11 +33,12 @@ export const INDEX_LINE_CAP = 200;
 // Claude Code names this as a byte budget in user-facing text, but 2.1.296
 // enforces it with JavaScript string.length (UTF-16 code units).
 export const INDEX_CHAR_CAP = 25_000;
-export const INDEX_BYTE_CAP = INDEX_CHAR_CAP;
 export const TOPIC_LINE_CAP = 200;
 export const TOPIC_BYTE_CAP = 4096;
 export const TOPIC_SCAN_CAP = 200;
 const TOPIC_SCAN_CONCURRENCY = 16;
+
+const NO_FOLLOW_READ = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
 const DEFAULT_STATE: ProjectMemoryState = {
 	schemaVersion: 1,
@@ -65,7 +65,7 @@ export function truncateIndex(raw: string): string {
 }
 
 export async function readRegularFileNoFollow(filePath: string): Promise<string> {
-	const handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const before = await handle.stat();
 		if (!before.isFile()) throw new Error(`Not a regular file: ${filePath}`);
@@ -147,6 +147,10 @@ export async function readIndex(memoryDir: string): Promise<string> {
 	}
 }
 
+function objectOrEmpty(value: unknown): Record<string, unknown> {
+	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
 function parseFrontmatter(head: string): { metadata: Record<string, unknown>; body: string } {
 	if (!head.startsWith("---\n")) return { metadata: {}, body: head };
 	const closing = /\n---(?:\n|$)/.exec(head.slice(4));
@@ -157,10 +161,7 @@ function parseFrontmatter(head: string): { metadata: Record<string, unknown>; bo
 		const parsed = YAML.parse(head.slice(4, end)) as unknown;
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { metadata: {}, body };
 		const raw = parsed as Record<string, unknown>;
-		const nested =
-			raw.metadata && typeof raw.metadata === "object" && !Array.isArray(raw.metadata)
-				? (raw.metadata as Record<string, unknown>)
-				: {};
+		const nested = objectOrEmpty(raw.metadata);
 		// Claude flattens non-standard top-level fields into metadata, with the
 		// explicit metadata mapping taking precedence. This keeps older files
 		// using top-level type/modified compatible with the current format.
@@ -230,10 +231,7 @@ async function scanTopicsInternal(
 						.slice(0, 30)
 						.join("\n");
 					const { metadata, body } = parseFrontmatter(head);
-					const nestedMetadata =
-						metadata.metadata && typeof metadata.metadata === "object" && !Array.isArray(metadata.metadata)
-							? (metadata.metadata as Record<string, unknown>)
-							: {};
+					const nestedMetadata = objectOrEmpty(metadata.metadata);
 					const modifiedValue = nestedMetadata.modified;
 					const modifiedParsed = typeof modifiedValue === "string" ? Date.parse(modifiedValue) : Number.NaN;
 					return {
@@ -381,7 +379,7 @@ export function lintMemoryContent(
 }
 
 async function fileSnapshot(filePath: string): Promise<{ content: string; baseline: ReadBaseline }> {
-	const handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const before = await handle.stat();
 		if (!before.isFile()) throw new Error(`Not a regular file: ${filePath}`);
@@ -411,11 +409,6 @@ export function sameBaseline(left: ReadBaseline, right: ReadBaseline): boolean {
 function baselineChanged(current: ReadBaseline | null, expected: ReadBaseline | null): boolean {
 	if (current === null || expected === null) return current !== expected;
 	return Math.floor(current.mtimeMs) > expected.mtimeMs && !sameBaseline(current, expected);
-}
-
-export async function assertBaseline(filePath: string, expected: ReadBaseline): Promise<void> {
-	if (!sameBaseline(await baseline(filePath), expected))
-		throw new Error(`File changed since it was read: ${filePath}. Read it again before editing.`);
 }
 
 async function publishFile(
@@ -502,7 +495,7 @@ function dreamStateFile(paths: ProjectPaths): string {
 async function readStateFile(filePath: string): Promise<ProjectMemoryState | undefined> {
 	let handle: Awaited<ReturnType<typeof open>>;
 	try {
-		handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+		handle = await open(filePath, NO_FOLLOW_READ);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw error;
@@ -537,10 +530,6 @@ export async function readState(paths: ProjectPaths): Promise<ProjectMemoryState
 		(await readStateFile(shared)) ??
 		(shared === paths.stateFile ? undefined : await readStateFile(paths.stateFile)) ?? { ...DEFAULT_STATE }
 	);
-}
-
-export async function writeState(paths: ProjectPaths, state: ProjectMemoryState): Promise<void> {
-	await atomicWrite(dreamStateFile(paths), `${JSON.stringify(state, null, 2)}\n`);
 }
 
 export async function compareAndSwapLastDreamAt(
@@ -580,7 +569,7 @@ export async function compareAndSwapLastDreamAt(
 const SESSION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
 async function readSessionHeader(filePath: string): Promise<{ id: string; cwd?: string; mtimeMs: number } | undefined> {
-	const handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const info = await handle.stat();
 		if (!info.isFile()) return undefined;
@@ -791,10 +780,6 @@ export async function acquireLock(lockFile: string, staleMs: number): Promise<Lo
 	}
 }
 
-export async function ensureReadable(filePath: string): Promise<void> {
-	await access(filePath, constants.R_OK);
-}
-
 export interface MarkdownSnapshotEntry {
 	hash: string;
 	mtimeMs: number;
@@ -819,7 +804,7 @@ async function markdownSnapshotEntry(
 	filePath: string,
 	previous?: MarkdownSnapshotEntry,
 ): Promise<MarkdownSnapshotEntry> {
-	const handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const before = await handle.stat();
 		if (!before.isFile()) throw new Error(`Not a regular file: ${filePath}`);
@@ -842,14 +827,19 @@ async function markdownSnapshotEntry(
 	}
 }
 
+function markdownAbsolutePath(memoryDir: string, relativePath: string): string | undefined {
+	if (!relativePath.endsWith(".md") || containsVcsMetadataSegment(relativePath)) return undefined;
+	const absolute = resolve(memoryDir, relativePath);
+	return isContainedPath(memoryDir, absolute) ? absolute : undefined;
+}
+
 export async function readMarkdownFileSnapshot(
 	memoryDir: string,
 	relativePath: string,
 ): Promise<{ content: string; snapshot: MarkdownSnapshotEntry } | undefined> {
-	if (!relativePath.endsWith(".md") || containsVcsMetadataSegment(relativePath)) return undefined;
-	const absolute = resolve(memoryDir, relativePath);
-	if (!isContainedPath(memoryDir, absolute)) return undefined;
-	const handle = await open(absolute, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch(() => undefined);
+	const absolute = markdownAbsolutePath(memoryDir, relativePath);
+	if (!absolute) return undefined;
+	const handle = await open(absolute, NO_FOLLOW_READ).catch(() => undefined);
 	if (!handle) return undefined;
 	try {
 		const before = await handle.stat();
@@ -871,9 +861,8 @@ export async function snapshotMarkdownFile(
 	relativePath: string,
 	previous?: MarkdownSnapshotEntry,
 ): Promise<MarkdownSnapshotEntry | undefined> {
-	if (!relativePath.endsWith(".md") || containsVcsMetadataSegment(relativePath)) return undefined;
-	const absolute = resolve(memoryDir, relativePath);
-	if (!isContainedPath(memoryDir, absolute)) return undefined;
+	const absolute = markdownAbsolutePath(memoryDir, relativePath);
+	if (!absolute) return undefined;
 	try {
 		return await markdownSnapshotEntry(absolute, previous);
 	} catch {

@@ -20,12 +20,19 @@ function count(value: number, noun: string): string {
 	return `${value} ${noun}${value === 1 ? "" : "s"}`;
 }
 
+const SOURCE_LABELS: Record<MemoryUpdateView["source"], { summary: string; header: string }> = {
+	extract: { summary: "Saved", header: "Saved" },
+	dream: { summary: "Organized", header: "Organized" },
+	external: { summary: "Updated", header: "Changed externally" },
+};
+
 function updateLabel(update: MemoryUpdateView): string {
 	const topics = update.paths.filter((path) => path !== "MEMORY.md").length;
 	if (topics === 0) return "Updated index";
-	const action = update.source === "dream" ? "Organized" : update.source === "extract" ? "Saved" : "Updated";
-	return `${action} ${count(topics, "topic")}`;
+	return `${SOURCE_LABELS[update.source].summary} ${count(topics, "topic")}`;
 }
+
+const expansion = new WeakMap<object, { expanded: boolean; open: boolean }>();
 
 /** Only the presentation changes; the original content remains in the model context. */
 export const renderMemoryMessage: MessageRenderer<MemoryMessageDetails> = (message, { expanded, outputPad }, theme) => {
@@ -44,9 +51,8 @@ export const renderMemoryMessage: MessageRenderer<MemoryMessageDetails> = (messa
 	}
 
 	const lines: string[] = [];
-	const sources = { extract: "Saved", dream: "Organized", external: "Changed externally" };
 	for (const update of updates) {
-		lines.push(`${sources[update.source]}:`, ...update.paths.map((path) => `  ${path}`));
+		lines.push(`${SOURCE_LABELS[update.source].header}:`, ...update.paths.map((path) => `  ${path}`));
 	}
 	if (!updates.length && details?.updatedPaths?.length && !details.updates?.length)
 		lines.push("Updated:", ...details.updatedPaths.map((path) => `  ${path}`));
@@ -67,11 +73,12 @@ export const renderMemoryMessage: MessageRenderer<MemoryMessageDetails> = (messa
 	const detail = sanitizeMemoryText(lines.join("\n")).trim();
 	// Pi rebuilds renderers for keyboard expansion and theme changes. Keep a local
 	// click override across rebuilds without changing persisted message details.
-	let open = expansion.get(message)?.expanded === expanded ? (expansion.get(message)?.open ?? expanded) : expanded;
+	const previous = expansion.get(message);
+	let open = previous?.expanded === expanded ? previous.open : expanded;
 	expansion.set(message, { expanded, open });
 	const text = new Text("", outputPad, 0);
 	const refresh = () => {
-		const summary = theme.fg("muted", `${open ? "▾" : "▸"} Memory · ${labels.join(" · ")}`);
+		const summary = theme.fg("muted", `Memory · ${labels.join(" · ")}`);
 		text.setText(`${summary}${open && detail ? `\n\n${detail}` : ""}`);
 	};
 	refresh();
@@ -83,5 +90,3 @@ export const renderMemoryMessage: MessageRenderer<MemoryMessageDetails> = (messa
 		return { handled: true, render: true };
 	});
 };
-
-const expansion = new WeakMap<object, { expanded: boolean; open: boolean }>();
