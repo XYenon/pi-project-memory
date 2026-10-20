@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ChildCodemodeOptions } from "./src/child-codemode.ts";
 import { configPath, loadConfig } from "./src/config.ts";
-import { renderMemoryMessage } from "./src/memory-message.ts";
+import { type MemoryMessageDetails, renderMemoryMessage } from "./src/memory-message.ts";
 import { MemoryStatus } from "./src/memory-status.ts";
 import {
 	addUsage,
@@ -70,6 +70,7 @@ interface PendingMemoryUpdate {
 	source: "extract" | "dream" | "external";
 	summary: string;
 	paths: string[];
+	displayed?: boolean;
 }
 
 interface RecallPrefetchResult {
@@ -93,6 +94,7 @@ interface RecallPrefetch {
 }
 
 interface RuntimeState {
+	appendEntry: ExtensionAPI["appendEntry"];
 	config: ProjectMemoryConfig;
 	getCodemode: () => ChildCodemodeOptions | undefined;
 	/** Directory configuration is pinned for the whole session, including disabled periods. */
@@ -149,6 +151,22 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 	const backgroundUsage = processBackgroundUsage();
 	pi.registerMessageRenderer(RECALL_MESSAGE, renderMemoryMessage);
 	pi.registerMessageRenderer(UPDATE_MESSAGE, renderMemoryMessage);
+	const entryMessages = new WeakMap<object, Parameters<typeof renderMemoryMessage>[0]>();
+	pi.registerEntryRenderer<MemoryMessageDetails>(UPDATE_MESSAGE, (entry, options, theme) => {
+		let message = entryMessages.get(entry);
+		if (!message) {
+			message = {
+				role: "custom",
+				customType: UPDATE_MESSAGE,
+				content: "",
+				details: entry.data,
+				display: true,
+				timestamp: Date.parse(entry.timestamp),
+			};
+			entryMessages.set(entry, message);
+		}
+		return renderMemoryMessage(message, { ...options, outputPad: pi.getSettings().outputPad ?? 1 }, theme);
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		runtime?.maintenanceStatus?.dispose();
@@ -189,6 +207,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 			extractionPreparations: new Set(),
 			maintenanceSnapshots: new Map(),
 			readSnapshots: new Map(),
+			appendEntry: pi.appendEntry.bind(pi),
 			pendingMemoryUpdates: [],
 			trailingExtraction: false,
 			shuttingDown: false,
@@ -455,7 +474,13 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 		// baseline so a write racing between the two hooks is not hidden.
 		for (const [path, expected] of state.maintenanceSnapshots) {
 			const current = await snapshotMarkdownFile(paths.memoryDir, path, state.turnSnapshot.get(path));
-			if ((current?.hash ?? null) === expected) state.maintenanceSnapshots.delete(path);
+			if ((current?.hash ?? null) === expected) {
+				state.maintenanceSnapshots.delete(path);
+				// Advance only our own writes so later change detection does not
+				// announce them again as external edits.
+				if (current) state.turnSnapshot.set(path, current);
+				else state.turnSnapshot.delete(path);
+			}
 		}
 	});
 
@@ -1191,10 +1216,9 @@ async function scheduleExtraction(
 				state.cursorEntryId = leafId;
 				state.turnsSinceExtraction = 0;
 				state.handledDirectWriteEpoch = Math.max(state.handledDirectWriteEpoch, directWriteEpoch);
-				if (result.touchedPaths.length > 0 && ctx.hasUI)
-					ctx.ui.notify(`Project memory updated: ${result.touchedPaths.join(", ")}`, "info");
-				else if (manual && !result.error && ctx.hasUI)
-					ctx.ui.notify("Extraction complete. No memory changes were needed.", "info");
+				if (result.touchedPaths.length > 0) showMemoryUpdate(ctx, state, "extract");
+				else if (manual && !result.error && ctx.hasUI && !state.panelOpen)
+					ctx.ui.notify("No memory changes needed.", "info");
 				return result;
 			})
 			.catch((error) => {
@@ -1319,11 +1343,9 @@ async function maybeDream(ctx: ExtensionContext, state: RuntimeState, manual: bo
 				if (!operationIsCurrent(state, ctx, identity) || abortController.signal.aborted) return result;
 				state.lastDreamError = result.error;
 				if (result.error) notifyError(ctx, "memory dream", result.error);
-				else if (manual || result.touchedPaths.length > 0)
-					ctx.ui.notify(
-						`Memory dream complete${result.touchedPaths.length ? `: ${result.touchedPaths.join(", ")}` : ""}`,
-						"info",
-					);
+				if (result.touchedPaths.length > 0) showMemoryUpdate(ctx, state, "dream");
+				else if (!result.error && manual && ctx.hasUI && !state.panelOpen)
+					ctx.ui.notify("No memory changes needed.", "info");
 				return result;
 			})
 			.catch(async (error) => {
@@ -1430,7 +1452,7 @@ function queueMemoryUpdate(state: RuntimeState, source: PendingMemoryUpdate["sou
 		state.recalled.delete(path);
 		if (state.loadedMemoryPaths.has(path)) state.staleLoadedMemoryPaths.add(path);
 	}
-	const pending = state.pendingMemoryUpdates.find((update) => update.source === source);
+	const pending = state.pendingMemoryUpdates.find((update) => update.source === source && !update.displayed);
 	const unique = [...new Set([...(pending?.paths ?? []), ...changed])].sort();
 	let summary: string;
 	if (source === "external") {
@@ -1450,6 +1472,19 @@ function queueMemoryUpdate(state: RuntimeState, source: PendingMemoryUpdate["sou
 	} else state.pendingMemoryUpdates.push({ source, summary, paths: unique });
 }
 
+function showMemoryUpdate(ctx: ExtensionContext, state: RuntimeState, source: PendingMemoryUpdate["source"]): void {
+	if (!ctx.hasUI || state.shuttingDown) return;
+	const updates = state.pendingMemoryUpdates.filter((update) => update.source === source && !update.displayed);
+	if (!updates.length) return;
+	if (!state.panelOpen)
+		state.appendEntry(UPDATE_MESSAGE, {
+			updates: structuredClone(updates),
+			stalePaths: [...state.staleLoadedMemoryPaths].sort(),
+		});
+	for (const update of updates) update.displayed = true;
+	state.lastDisplayedStalePaths = JSON.stringify([...state.staleLoadedMemoryPaths].sort());
+}
+
 interface MemoryUpdateMessage {
 	content: string;
 	paths: string[];
@@ -1467,7 +1502,9 @@ function drainMemoryUpdates(state: RuntimeState, consume = true): MemoryUpdateMe
 	const paths = [...new Set(updates.flatMap((update) => update.paths))].sort();
 	const stale = [...state.staleLoadedMemoryPaths].sort();
 	const staleKey = JSON.stringify(stale);
-	const display = consume && (updates.length > 0 || (stale.length > 0 && staleKey !== state.lastDisplayedStalePaths));
+	const display =
+		consume &&
+		(updates.some((update) => !update.displayed) || (stale.length > 0 && staleKey !== state.lastDisplayedStalePaths));
 	if (consume) state.lastDisplayedStalePaths = staleKey;
 	const labels: Record<PendingMemoryUpdate["source"], string> = {
 		extract: "Background memory extraction",

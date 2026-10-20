@@ -9,6 +9,7 @@ import {
 	convertToLlm,
 	createReadTool,
 	createWriteTool,
+	type EntryRenderer,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type KeybindingsManager as ExtensionKeybindingsManager,
@@ -36,6 +37,8 @@ function fakeExtensionApi() {
 	const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => unknown }>();
 	const sentMessages: Array<{ message: any; options: any }> = [];
 	const renderers = new Map<string, MessageRenderer>();
+	const entryRenderers = new Map<string, EntryRenderer>();
+	const entries: Array<{ customType: string; data: any }> = [];
 	const api = {
 		on(event: string, handler: Handler) {
 			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
@@ -47,9 +50,14 @@ function fakeExtensionApi() {
 		registerMessageRenderer(name: string, renderer: MessageRenderer) {
 			renderers.set(name, renderer);
 		},
+		registerEntryRenderer(name: string, renderer: EntryRenderer) {
+			entryRenderers.set(name, renderer);
+		},
 		getActiveTools: () => [],
 		getSettings: () => ({}),
-		appendEntry() {},
+		appendEntry(customType: string, data: unknown) {
+			entries.push({ customType, data });
+		},
 		sendMessage(message: any, options: any) {
 			sentMessages.push({ message, options });
 		},
@@ -58,6 +66,8 @@ function fakeExtensionApi() {
 		api,
 		commands,
 		sentMessages,
+		entries,
+		entryRenderers,
 		renderers,
 		async emit(event: string, value: unknown, ctx: ExtensionContext) {
 			if (event === "before_agent_start") value = { messageType: "user", ...(value as object) };
@@ -386,7 +396,7 @@ test("manual extraction reports task progress and completion even without change
 	assert.ok(h.editorSnapshots.some((screen) => screen.includes("Memory: Extracting")));
 	assert.doesNotMatch(h.editorSnapshots.at(-1) ?? "", /Memory:/);
 	assert.equal(h.statusUpdates.length, 0, "memory must not add a footer status row");
-	assert.match(h.notices.at(-1)?.message ?? "", /Extraction complete.*No memory changes/);
+	assert.match(h.notices.at(-1)?.message ?? "", /No memory changes needed\./);
 });
 
 test("Pi lifecycle hooks honor trust, inject memory prompts, and drain shutdown", async (t) => {
@@ -1614,11 +1624,27 @@ test("background updates report changed files and stale loaded memories", async 
 	const start = { prompt: "", systemPromptOptions: { sections: {} as Record<string, string> } };
 	const result = (await harness.extension.emit("before_agent_start", start, harness.context)) as any;
 	assert.equal(result.message.customType, "pi-project-memory-update");
-	assert.equal(result.message.display, true);
+	assert.equal(harness.extension.entries.length, 1);
+	assert.equal(harness.extension.entries[0]?.customType, "pi-project-memory-update");
+	assert.deepEqual(harness.extension.entries[0]?.data.updates[0].paths, ["loaded.md"]);
+	const entry = {
+		type: "custom" as const,
+		id: "update-entry",
+		parentId: null,
+		timestamp: new Date().toISOString(),
+		...harness.extension.entries[0]!,
+	};
+	const renderer = harness.extension.entryRenderers.get(entry.customType)!;
+	const theme = { fg: (_color: string, text: string) => text } as Theme;
+	assert.match(renderer(entry, { expanded: false }, theme)!.render(80).join("\n"), /Memory · Saved 1 topic/);
+	assert.match(renderer(entry, { expanded: true }, theme)!.render(80).join("\n"), /loaded.md/);
+	assert.ok(!harness.notices.some((notice) => notice.message.startsWith("Project memory updated:")));
+	assert.equal(result.message.display, false, "the immediate entry already displayed this update");
 	assert.deepEqual(result.message.details.updates[0], {
 		source: "extract",
 		summary: "saved 1 topic memory",
 		paths: ["loaded.md"],
+		displayed: true,
 	});
 	assert.deepEqual(result.message.details.stalePaths, ["loaded.md"]);
 	assert.deepEqual(result.message.details.updatedPaths, ["loaded.md"]);
@@ -2090,7 +2116,7 @@ test("dream reads live session transcripts without staging or pre-parsing omitte
 	assert.equal(harness.faux.state.callCount, 4);
 	assert.equal(await readFile(source, "utf8"), `${header}\nlive content\n`);
 	assert.ok((await readState(harness.paths)).lastDreamAt > 0);
-	assert.ok(harness.notices.some((notice) => notice.message.startsWith("Memory dream complete")));
+	assert.ok(harness.notices.some((notice) => notice.message === "No memory changes needed."));
 });
 
 test("an unreadable dream transcript returns a tool error without rolling back the attempt", async (t) => {
@@ -2209,7 +2235,7 @@ test("dream keeps reservations for returned errors, aborts and completion notifi
 		if (outcome === "notification") {
 			const notify = harness.context.ui.notify;
 			harness.context.ui.notify = (message, level) => {
-				if (message.startsWith("Memory dream complete")) throw new Error("notification failed");
+				if (message === "No memory changes needed.") throw new Error("notification failed");
 				notify(message, level);
 			};
 		}
