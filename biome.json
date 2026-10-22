@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.2/schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!pnpm-lock.yaml"]
+    "includes": ["**", "!pnpm-lock.yaml", "!pnpm-workspace.yaml"]
   },
   "formatter": {
     "enabled": true,
@@ -36,6 +36,11 @@
       "indentStyle": "space",
       "indentWidth": 2,
       "trailingCommas": "none"
+    }
+  },
+  "markdown": {
+    "formatter": {
+      "enabled": false
     }
   },
   "assist": {
