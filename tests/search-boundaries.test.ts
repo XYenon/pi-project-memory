@@ -25,14 +25,14 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
 	return result.content.map((block) => block.text ?? "").join("\n");
 }
 
-test("native grep inherits host follow configuration without changing the environment", async (t) => {
+test("native grep ignores host configuration without changing the environment", async (t) => {
 	const env = await workspace(t);
 	const outside = join(env.root, "outside.txt");
 	await writeFile(outside, "OUTSIDE_MARKER\n");
 	await writeFile(join(env.projectRoot, "inside.txt"), "INSIDE_MARKER\n");
 	await symlink(outside, join(env.projectRoot, "linked.txt"));
 	const config = join(env.root, "ripgrep.config");
-	await writeFile(config, "--follow\n");
+	await writeFile(config, "--follow\n--fixed-strings\n");
 	const previous = process.env.RIPGREP_CONFIG_PATH;
 	process.env.RIPGREP_CONFIG_PATH = config;
 	t.after(() => {
@@ -40,10 +40,14 @@ test("native grep inherits host follow configuration without changing the enviro
 		else process.env.RIPGREP_CONFIG_PATH = previous;
 	});
 	const tools = new Map(createChildTools({ ...env, mode: "dream" }).map((tool) => [tool.name, tool]));
-	const result = await tools.get("grep")!.execute("grep", { path: env.projectRoot, pattern: "MARKER", glob: "**/*" });
+	const result = await tools.get("grep")!.execute("grep", {
+		path: env.projectRoot,
+		pattern: "(INSIDE|OUTSIDE)_MARKER",
+		glob: "**/*",
+	});
 	assert.notEqual(result.isError, true);
 	assert.match(resultText(result), /INSIDE_MARKER/);
-	assert.match(resultText(result), /OUTSIDE_MARKER/);
+	assert.doesNotMatch(resultText(result), /OUTSIDE_MARKER/);
 	assert.equal(process.env.RIPGREP_CONFIG_PATH, config);
 });
 

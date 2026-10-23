@@ -94,22 +94,6 @@ function indexEntry(topic: MemoryTopic): string | null {
 	return description && remaining > 1 ? `${prefix} — ${description.slice(0, remaining)}` : prefix;
 }
 
-async function publishExclusiveFile(filePath: string, content: string): Promise<boolean> {
-	let handle: Awaited<ReturnType<typeof open>>;
-	try {
-		handle = await open(filePath, "wx", 0o600);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-		throw error;
-	}
-	try {
-		await handle.writeFile(content, "utf8");
-	} finally {
-		await handle.close();
-	}
-	return true;
-}
-
 export async function backfillIndex(memoryDir: string): Promise<boolean> {
 	// Claude fills a missing index only when at least one safe topic can be
 	// represented. Keep headroom for later maintenance, matching its 80% target.
@@ -126,7 +110,7 @@ export async function backfillIndex(memoryDir: string): Promise<boolean> {
 		lines++;
 	}
 	if (!content) return false;
-	return publishExclusiveFile(join(memoryDir, INDEX_FILE), content);
+	return publishFile(join(await realpath(memoryDir), INDEX_FILE), content, undefined, true);
 }
 
 export async function readIndex(memoryDir: string): Promise<string> {
@@ -416,7 +400,7 @@ async function publishFile(
 	content: string,
 	beforeRename?: () => void | Promise<void>,
 	exclusiveCreate = false,
-): Promise<void> {
+): Promise<boolean> {
 	const parent = dirname(filePath);
 	const parentInfo = await lstat(parent);
 	if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) throw new Error(`Unsafe parent directory: ${parent}`);
@@ -436,12 +420,12 @@ async function publishFile(
 				if (process.platform === "android") await copyFile(temporary, filePath, constants.COPYFILE_EXCL);
 				else await link(temporary, filePath);
 			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code === "EEXIST")
-					throw new Error(`File was created while the update was staged: ${filePath}. Read it before editing.`);
+				if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
 				throw error;
 			}
 			await rm(temporary);
 		} else await rename(temporary, filePath);
+		return true;
 	} finally {
 		await rm(temporary, { force: true }).catch(() => {});
 	}
@@ -480,7 +464,8 @@ export async function atomicWriteIfBaseline(
 					throw new Error(`File has been modified since it was read: ${filePath}. Read it again before editing.`);
 				options.onChangedBaseline?.();
 			}
-			await publishFile(filePath, update(current), guard, currentBaseline === null);
+			if (!(await publishFile(filePath, update(current), guard, currentBaseline === null)))
+				throw new Error(`File was created while the update was staged: ${filePath}. Read it before editing.`);
 			return baseline(filePath);
 		});
 	} finally {
