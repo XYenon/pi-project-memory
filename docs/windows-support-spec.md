@@ -1,320 +1,155 @@
-﻿# Windows support spec
+# Windows support spec
 
-Status: assembled from the closed wayfinder tickets for [Windows support map](https://github.com/fktpp2022/pi-project-memory/issues/1). Awaiting review in [Consolidated Windows support spec review](https://github.com/fktpp2022/pi-project-memory/issues/12). Implementation is a later handoff.
+Status: reduced scope from the closed wayfinder tickets for [Windows support map](https://github.com/fktpp2022/pi-project-memory/issues/1), for review in [Consolidated Windows support spec review](https://github.com/fktpp2022/pi-project-memory/issues/12). The requirements below do not claim completed implementation or verification.
 
-Scope: make `pi-project-memory` fully usable on native Windows 10/11 (x64 and arm64) under Pi, with no regression on macOS, Linux, or Termux, and with Git Bash optional for background bash.
+Scope: basic native Windows support for `pi-project-memory` under Pi, with Git Bash optional for background work. macOS, Linux, and Termux behavior stays unchanged.
 
-## 1. Supported matrix
+## 1. Supported matrix and install
 
-| Axis       | Supported                                             |
-| ---------- | ----------------------------------------------------- |
-| OS         | Windows 10 22H2 and Windows 11                        |
-| Arch       | x64 and arm64                                         |
-| Node       | 22, 24, 26 (`engines.node >= 22.19.0`)                |
-| Pi         | current 1.4.x                                         |
-| Filesystem | local fixed NTFS, including hydrated OneDrive folders |
+| Axis | Target                                                 |
+| ---- | ------------------------------------------------------ |
+| OS   | Windows 10 22H2 and Windows 11                         |
+| Arch | x64 and arm64                                          |
+| Node | 22, 24, 26 (`engines.node >= 22.19.0`)                 |
+| Pi   | The versions allowed by the existing peer dependencies |
 
-- arm64 has no CI runner. It is validated by `tree-sitter`/`tree-sitter-bash` prebuild availability plus a documented manual smoke test.
-- Windows Server is out of scope.
-- No enforced minimum Pi version. `peerDependencies` stay `*`; the declaration records "tested against Pi 1.4.x; earlier 1.x lines untested".
+- `package.json` includes `win32` in `os`, with no `cpu` restriction. `engines.node` and the `*` peer dependencies stay unchanged.
+- `pi install git:...` and `pi install .` are supported install paths. `pi install npm:pi-project-memory` requires a release containing `win32` in its metadata.
+- `tree-sitter` and `tree-sitter-bash` still load when `src/bash-readonly.ts` initializes. A missing or incompatible native binding fails extension load with the dependency's error, even without Git Bash.
+- arm64 requires prebuild availability and a manual install smoke test because there is no arm64 CI runner. Windows Server is out of scope.
 
-## 2. Install and packaging
+User-facing Windows support claims may ship once the required `windows-latest` jobs are green on `master`. Live Pi install and extension-load checks belong in the manual checklist.
 
-- `package.json` `os` becomes `["darwin", "linux", "win32", "android"]`. No `cpu` field. `engines.node` unchanged.
-- `tests/config.test.ts` asserts the new `os` list.
-- Install paths:
-  - `pi install git:...` and `pi install .` (local clone) are supported today. The git path clones and runs `npm install` inside the clone, so the root `os` field does not block it; the local path only records the path.
-  - `pi install npm:pi-project-memory` becomes supported once a release carrying `win32` exists. Before that, npm-from-fork is not supported and the docs say so.
-- Native binding:
-  - `src/bash-readonly.ts` loads `tree-sitter` and `tree-sitter-bash` when the module initializes.
-  - A missing or incompatible binding fails extension load with the dependency's error. No custom loader, separate preflight, or lazy parser is needed.
-  - No degradation: a broken native binding is a broken install, unlike a missing Git Bash.
-- Live `pi install` and extension-load smoke stay out of CI; they are part of the manual checklist.
-- Release gate: user-facing "supported on Windows" claims (README matrix, npm description) may only ship once the required `windows-latest` job is green on `master`. Implementation workstreams may merge earlier without the claim.
+## 2. Shell and background tools
 
-## 3. Shell and background tools
+### Detection and cache
 
-### Detection
+Probe candidates in order:
 
-Probe order:
+1. User `shellPath`, when set.
+2. `C:\Program Files\Git\bin\bash.exe`.
+3. `%LOCALAPPDATA%\Programs\Git\bin\bash.exe`.
+4. `where bash.exe`.
 
-1. user `shellPath`, when set
-2. `C:\Program Files\Git\bin\bash.exe`
-3. `%LOCALAPPDATA%\Programs\Git\bin\bash.exe`
-4. `where bash.exe`
+Validate candidates with `bash -c 'uname -s'`, accepting `MINGW*` or `MSYS*`. The legacy WSL launcher reports `Linux` and is rejected. An explicit `shellPath` is authoritative. If validation fails, disable background Bash and report the path and reason without falling through.
 
-Every candidate is validated by `bash -c 'uname -s'`, which must match `MINGW*` or `MSYS*`. This rejects the legacy WSL launcher (`%SystemRoot%\System32\bash.exe`), which reports `Linux`.
+Cache availability until config reload or session restart. Installing or removing Git Bash does not trigger a probe on each background run. The tools and prompt stay fixed during a run, and removing the executable can cause Bash calls to fail as tool errors.
 
-- An explicit `shellPath` is authoritative. If it fails validation, bash is disabled and status names the path and reason; the probe does not silently fall through.
-- Results are cached per session and re-probed at the start of each background run.
-- `shellCommandPrefix` is not honored by background bash; this is documented.
+Background Bash does not honor `shellCommandPrefix`.
 
-### Tool set
+### Tools and prompts
 
-- `createChildTools` returns `[read, write, edit, find, grep, bash]` when a validated Git Bash exists, otherwise `[read, write, edit, find, grep]`.
-- No stub bash tool. The codemode allowlist derives from the same array.
-- Native `read`/`find`/`grep` and the extension `read`/`write`/`edit` are unaffected; recall and `/memory` keep working.
-- Known limitation: native `grep` exits 2 on ACL-denied files, so a background grep over such a tree fails the call instead of returning partial results.
+- `createChildTools` returns `[read, write, edit, find, grep, bash]` with validated Git Bash and `[read, write, edit, find, grep]` without it. There is no stub Bash tool, and the codemode allowlist uses the same array.
+- Native `read`/`find`/`grep` and extension `read`/`write`/`edit` remain available without Bash. Recall, `/memory`, extraction, and dream maintenance continue to work.
+- `src/prompts.ts` and `src/child-codemode.ts` select their no-Bash text from the same availability result. The text removes read-only Bash and `bash rm` instructions and states that shell access is unavailable for the run.
+- The with-Bash prompt fixtures remain unchanged. No-Bash fixtures cover both background roles and codemode `on` and `only` modes.
 
-### Prompt and codemode text
-
-- `src/prompts.ts` and `src/child-codemode.ts` each gain a no-bash variant chosen by the same availability check.
-- The variant removes the read-only-bash and `bash rm` clauses from the allowed set and states that shell access is unavailable in this run.
-- `tests/fixtures/prompts/` stays word-for-word for the with-bash case. The no-bash variants are regenerated once and the changed lines are listed in this spec as the documented allowed adaptation.
+Native `grep` can exit 2 on ACL-denied files, which fails the background call rather than returning partial results.
 
 ### Notice and status
 
-- One-time TUI notice per Pi session, on the first background run that would have offered bash. Not persisted across sessions, not repeated per project.
-- `/memory status` reports exactly one of:
-  - `Git Bash: <path>`
-  - `Git Bash: not found — bash tool disabled`
-  - `Git Bash: rejected (<path> is WSL)`
+Show one TUI notice per Pi session on the first background run that would have offered Bash. Do not repeat it per project or persist it across sessions.
 
-### Mid-session change
+`/memory status` reports the selected Git Bash path, missing Bash with the tool disabled, or a rejected candidate with its path and reason. Status uses cached availability until config reload or session restart.
 
-- Availability is re-probed per background run; the tool set and prompt are frozen for that run.
-- A shell installed mid-session takes effect next run. A shell removed mid-run makes `bash` calls fail as tool errors.
-
-## 4. Paths
+## 3. Windows paths
 
 ### Accepted forms
 
-| Form                | Example                                | Handling                                         |
-| ------------------- | -------------------------------------- | ------------------------------------------------ |
-| Native drive        | `C:\mem\a.md`                          | canonical                                        |
-| Forward-slash drive | `C:/mem/a.md`                          | canonical after separator normalization          |
-| Git Bash / MSYS     | `/c/mem/a.md`, `/d/...`                | drive-letter expansion                           |
-| Cygwin              | `/cygdrive/c/mem/a.md`                 | drive-letter expansion                           |
-| WSL                 | `/mnt/c/mem/a.md`                      | drive-letter expansion                           |
-| Home                | `~`, `~/x`, `~\x`                      | expand against the user profile, both separators |
-| Extended-length     | `\\?\C:\mem\a.md`, `\\?\UNC\srv\share` | strip prefix and continue                        |
-| UNC                 | `\\server\share\a.md`                  | parsed as absolute, then subject to root policy  |
+| Form                | Example                                | Handling                              |
+| ------------------- | -------------------------------------- | ------------------------------------- |
+| Native drive        | `C:\mem\a.md`                          | Native Windows form                   |
+| Forward-slash drive | `C:/mem/a.md`                          | Normalize separators                  |
+| Git Bash / MSYS     | `/c/mem/a.md`                          | Expand the drive prefix               |
+| Cygwin              | `/cygdrive/c/mem/a.md`                 | Expand the drive prefix               |
+| WSL drive path      | `/mnt/c/mem/a.md`                      | Expand the drive prefix               |
+| Home                | `~`, `~/x`, `~\x`                      | Expand against the user profile       |
+| Extended-length     | `\\?\C:\mem\a.md`, `\\?\UNC\srv\share` | Strip the prefix before normalization |
+| UNC                 | `\\server\share\a.md`                  | Parse as an absolute Windows path     |
 
-Canonical output is native drive form with backslashes and on-disk casing.
+Windows normalization expands home and drive prefixes, normalizes separators, and resolves against the base. Canonical paths use native separators and on-disk casing. Reject drive-relative forms such as `C:foo` and `C:`, and reject `:` after the drive prefix to prevent alternate data streams. Do not expand `%VAR%`.
 
-Rejected with explicit hints:
+Use shared Windows normalization and containment rules in `resolveToolPath`, `configuredMemoryDirectory`, `assertContainedMarkdown`, `parseDelete`, and child-tool revalidation. Leave POSIX `memoryDir` resolution, namespace hashing, and display paths unchanged.
 
-- drive-relative forms (`C:foo`, `C:`)
-- `%VAR%` expansion (never performed)
-- any `:` in a segment after the drive prefix, including `::$DATA` (ADS guard)
+### Containment and casing
 
-### Normalization order
+Resolve Windows memory roots and existing containing paths with `realpath`. Containment uses case-insensitive Windows path comparisons and filesystem checks. Apply the same rules to read, write, edit, delete, teardown, and index exclusion.
 
-`normalizePathInput` performs, in order: expand `~` → strip `\\?\` / `\\?\UNC\` → expand MSYS/Cygwin/WSL prefixes → normalize separators → reject drive-relative → `resolve` against the base → reject ADS segments → containing-root `realpath`.
+On Windows, `.md` and `MEMORY.md` comparisons are case-insensitive. Scanning uses a case-insensitive pattern and deduplicates by canonical path.
 
-One helper and one containment predicate are used by `resolveToolPath`, `configuredMemoryDirectory`, `assertContainedMarkdown`, `parseDelete`, and child-tool revalidation. No call site keeps its own `~` or prefix logic.
+There is no fixed-drive restriction or PowerShell drive probe. Do not add hardcoded memory path, filename, or Bash working-directory length budgets. Filesystem and process errors report platform limits when encountered.
 
-### Containment
+### Restricted Bash
 
-- `memoryDir` is canonicalized once at startup with `realpath`; that value is used everywhere, including namespace hashing and `displayPath`.
-- Containment compares case-folded `path.win32` forms, then re-checks both sides with `realpath`.
-- One primitive serves read, write, edit, delete, teardown, and index exclusion. `path.relative` is not a containment proxy.
+Parse Bash commands as written, with normal Bash quoting and escaping. Do not rewrite backslashes before parsing. Model-authored paths should use forward slashes or MSYS form, or quote and escape native paths correctly.
 
-### Root policy
+Normalize parsed `rm` operands on a copy for validation. Accept drive paths, MSYS/Cygwin/WSL drive forms, and home-relative paths. Reject genuinely relative operands. Each operand must resolve to a Markdown file inside the memory root and outside protected subdirectories.
 
-- After `realpath`, the memory root must match `^[A-Z]:\`.
-- `subst` drives pass automatically.
-- Rejected at startup with `memory root is not a local fixed drive`: UNC, `\\?\UNC\`, network-mapped, removable, and unknown drive types.
-- Hydrated OneDrive is supported. Dehydrated Files On-Demand placeholders are documented as unsupported.
+`rm` never executes through Bash. `prepareRestrictedBash` returns `kind: "delete"`, and `safeDeleteMemoryFile` performs deletion.
 
-### Case and ADS rules
+## 4. Storage and safety
 
-- `.md` matches case-insensitively on Windows; `FOO.MD` is a valid topic.
-- The index name `MEMORY.md` is compared case-insensitively.
-- Scanning uses a case-insensitive pattern and dedupes by canonical path.
-- Any `:` after the drive prefix is rejected.
+### Filesystem errors and publication
 
-### Budget
+Filesystem errors propagate immediately without automatic storage retries. Preserve the original error, including its code and paths. Callers can retry after closing file handles or resolving permission and sync conflicts.
 
-- The full memory path must stay within `259 − 18 = 241` characters; startup fails with the offending path otherwise.
-- Generated topic filenames are capped so a full file path never exceeds 258 characters.
-- Background bash refuses a run `cwd` longer than 258 characters.
-- `git -C` cannot exceed the spawn limit even with `core.longpaths`; documented limitation.
+Windows keeps `link` plus `EEXIST` for exclusive creation. The existing Android copy fallback stays unchanged. Replacement does not clear a read-only attribute. A failed replacement leaves the original content intact. Deletion uses Node's `fs.rm`, including its native Windows handling of read-only files.
 
-### Restricted bash
+Existing lock ownership, stale-lock recovery, payload compatibility, and PID behavior stay unchanged.
 
-- The typed command is not rewritten. Git Bash already understands `/c/...`.
-- `rm` operands are normalized on a copy for validation. Accepted operand forms: drive letter, `/c/...`, `/cygdrive/c/...`, `/mnt/c/...`, `~`-relative. Genuinely relative operands are rejected.
-- Normalized operands must resolve to a `.md` file inside the memory root, outside protected subdirectories.
-- `rm` never executes through bash: `prepareRestrictedBash` returns `kind: "delete"` and deletion goes through `safeDeleteMemoryFile`.
-- Model-authored read-only bash commands should use forward slashes or MSYS form, because Git Bash collapses unquoted backslashes. This is a docs note, not a code seam.
+### Reparse points and no-follow checks
 
-## 5. Storage, atomicity, and locking
-
-### Retries
-
-- Retry only `EPERM`, `EBUSY`, `EACCES`, for idempotent steps: publish replace, delete, and teardown.
-- 5 attempts, 50/100/200/400/800 ms with jitter (~1.6 s worst case), then fail with: `<path> is open in another process — close editors, pause OneDrive sync, or retry`.
-- No retry for other codes, no unbounded spin.
-
-### Read-only targets
-
-- Replacement does not clear a read-only attribute. After bounded retries fail, the original content remains intact. Clear the attribute before retrying the update.
-- Deletion uses Node's `fs.rm`, whose Windows implementation can clear the read-only attribute. No separate extension-level recovery or attribute notice is added.
-
-### Hard-link publish
-
-- No `copyFile` fallback. `link` + `EEXIST` stays the exclusive-create primitive.
-- Other link failures preserve Node's original error, including its errno and paths. Sharing violations receive the same bounded retries as replacement and deletion.
-
-### Reparse points and no-follow
-
-- On Windows, a memory root that is itself a junction or symlink is rejected at startup. POSIX keeps accepting symlink memory roots.
-- Scanning uses `followSymbolicLinks: false` and skips reparse entries, so scan and snapshot agree.
-- Direct read/write/edit/delete refuses any path with a reparse point in its ancestry, verified per file.
-- POSIX storage reads retain `O_NOFOLLOW`. Windows storage reads check absolute ancestors with `lstat` before opening the file.
-- Documented limitation: the Windows check before open leaves a residual TOCTOU window that `O_NOFOLLOW` closes on POSIX for the final entry.
-
-### Locks
-
-- Payload records `pid`, a random ownership token, and acquisition time. Unused process-start and hostname fields are omitted.
-- Creation uses `wx`. Heartbeat uses `utimes` at `staleMs / 3`, bounded to 100–1000 ms.
-- A stale heartbeat permits recovery only when the owner is not alive. `pid: 0` is dead; live owners remain protected by `process.kill(pid, 0)`.
-- Recovery rechecks the heartbeat and ownership token before replacing a stale lock. PID reuse remains a limitation; writing an unused start token would not solve it.
+- Reject a Windows memory root that is itself a junction or symlink. POSIX continues to accept symlink memory roots.
+- Snapshots use `followSymbolicLinks: false`. Storage reads reject Windows symlinks and junctions when scanning memory files.
+- Storage reads check Windows ancestors with `lstat` before opening each file. Native tool reads keep their existing behavior, and writes remain inside memory. Deleting a symlink removes the link itself.
+- Retain POSIX `O_NOFOLLOW`. The Windows check before opening leaves a race window that POSIX `O_NOFOLLOW` closes for the final entry.
 
 ### Permissions
 
-- `chmod` runs on POSIX only; skipped on Windows.
-- "Private directory" wording is removed from Windows code paths.
-- Windows privacy is the inherited user-profile ACL; no explicit ACL hardening.
+Run `chmod` on POSIX only. Windows privacy relies on inherited user-profile ACLs, with no explicit ACL hardening. Documentation must not describe Windows directories as private because of POSIX mode bits.
 
-## 6. Tests and CI
+## 5. Tests and CI
 
-### Matrix
+Required CI targets are `ubuntu-latest`, `macos-latest`, and `windows-latest` on Node 22/24/26, with `fail-fast: false`. Install `ripgrep` and `fd` on Windows. Git Bash must pass both shell detection and execution in the child-tool test rather than silently skipping it.
 
-- Shared matrix: `ubuntu-latest`/`macos-latest`/`windows-latest` × Node 22/24/26, required, `fail-fast: false`.
-- No arm64 runner.
+Use `.gitattributes` with `* text=auto eol=lf`. Do not normalize CRLF inside tests. Close watchers and child processes and leave temporary working directories before teardown. Node's bounded cleanup retries are limited to test helpers.
 
-### Prerequisites
+Keep shared storage tests on Windows. Skip POSIX-only permission assertions, `ulimit`, and `xargs` cases explicitly through a shared `skipOnWindows(reason)` helper, and document the reasons. Do not use silent `if (win32) return` exits.
 
-- `.gitattributes` with `* text=auto eol=lf`, index renormalized once. No CRLF normalization inside tests.
-- Install `ripgrep` and `fd` on the Windows runner.
-- Assert the resolved `bash` reports `MINGW*`/`MSYS*`; fail the job otherwise.
-- The child-tool test also requires the extension's own shell probe and Bash execution to succeed in CI. Missing Git Bash must not silently skip that test.
+Required coverage:
 
-### Skips
+- Path tests cover accepted forms, drive-relative and ADS rejection, case-insensitive containment, `.MD`, and protected paths. Windows integration tests exercise read, write, edit, and delete, including junction rejection and read-only files.
+- Both shell states cover memory operations and extraction/dream maintenance. No-Bash cases cover native search/read/edit/write, tool lists, allowlists, prompt variants, and codemode `on` and `only` for both background roles.
+- Shell tests cover explicit invalid paths, WSL rejection, cached availability, refresh on config reload or session restart, and the once-per-session notice. Storage failures propagate immediately without recovery retries.
+- The metadata test checks `win32` on every OS. Required Windows jobs must pass, and documented POSIX skips must match the tests.
 
-- POSIX-only tests skip through one `skipOnWindows(reason)` helper keyed on `process.platform`, with the reason emitted.
-- Shared storage behavior still runs on Windows. Only POSIX permission assertions are omitted from the hard-link replacement and exclusive-create tests.
-- The same list is reproduced in the user docs.
-- `ulimit` and `xargs` blocks are gated the same way.
-- No `if (win32) return` early exits.
+## 6. Documentation and compatibility
 
-### Teardown
+This spec records the scope of the Windows adaptation. Windows support does not add a different storage protocol, migration, or recovery policy.
 
-- Bounded jittered retry, explicit close of watchers and children, and `chdir` out of temp directories before removal.
-- Success criterion: repeated Windows runs are not flaky.
+Privacy wording must explain that POSIX uses `0600`/`0700` mode bits, while Windows relies on inherited ACLs and receives no ACL hardening. Troubleshooting must match actual errors without promising custom retry messages or drive-policy errors.
 
-### New tests
+Existing POSIX memory paths, project namespaces, migrations, locks, and state files remain compatible. Windows requires no migration from an earlier supported layout.
 
-- Cross-platform unit tests for pure path rules: forms, drive-relative rejection, ADS rejection, case-insensitive containment, `.MD`, budget arithmetic.
-- Existing test files cover shell detection, path rules, storage, and lifecycle behavior. Windows-only integration cases exercise native path forms through read/edit/write/delete, file sharing, and read-only attributes.
-- Both shell states exercise memory operations. Without Bash, tests run native search/read/edit/write and extraction/dream maintenance. Codemode tests cover both states in `on` and `only` modes for both background roles.
-- Storage fault injection covers transient recovery, exhausted retries, non-retryable errors, and revoked mutation permission for rename, exclusive link publication, and deletion.
-- The metadata test asserts `os` includes `win32` on every OS.
+## 7. Manual acceptance
 
-## 7. Docs and security claims
+Pi installation and extension loading can be checked manually. They are not additional CI requirements for this PR. Native Windows arm64 execution remains unverified by CI.
 
-- `docs/windows.md` and `docs/windows.zh.md` are the single source: matrix, install, shell, accepted paths, root policy, budget, limitations, troubleshooting, manual checklist.
-- `README.md`, `docs/configuration.md`, `docs/design-and-security.md`, `docs/development.md` keep short caveats and link to the Windows page.
-- `docs/claude-code-compatibility.md` gets no Windows section; it covers behavioral parity, not platform support.
-- Privacy wording everywhere becomes:
+On a clean Windows 11 x64 system:
 
-  > On POSIX, memory files and directories are created with `0600`/`0700` mode bits. On Windows those bits are cosmetic: Node cannot set owner/group/other permissions, and privacy relies on the inherited user-profile ACL. The extension does not add ACL hardening.
+1. Install through Pi and start in a Git repository. Recall should show no error with no existing memory.
+2. Run `/memory extract` and `/memory dream`. Verify the topic, index, completed provider turns, and `lastDreamAt`.
+3. With Git Bash, verify six tools, Bash execution, validated memory deletion, and the selected path in `/memory status`.
+4. Make Git Bash unavailable and reload config or restart the session. Verify five tools, native memory operations, no-Bash prompts, the one-time notice, and disabled Bash status.
+5. Restore Git Bash and reload config or restart the session. Verify Bash becomes available again. A change without reload or restart must retain cached availability.
+6. Check accepted Windows paths, case differences, ADS rejection, junction rejection, and immediate filesystem errors without retries.
+7. Remove the extension through Pi and verify memory files remain in place.
 
-- Chinese docs update in the same change. `docs/development.md` gains a contributor checklist line requiring the matching `.zh.md` update.
-- Troubleshooting table maps the exact emitted strings to cause and fix:
+## 8. Out of scope
 
-| Message                                    | Cause                                     | Fix                                                      |
-| ------------------------------------------ | ----------------------------------------- | -------------------------------------------------------- |
-| `Git Bash: not found — bash tool disabled` | no validated `bash.exe`                   | install Git for Windows, or set `shellPath`              |
-| `Git Bash: rejected (<path> is WSL)`       | candidate resolves to the WSL launcher    | point `shellPath` at `C:\Program Files\Git\bin\bash.exe` |
-| `<path> is open in another process`        | sharing violation                         | close the handle or pause sync; retry                    |
-| memory path exceeds the budget             | long project path or agent root           | shorten the project path or agent root                   |
-| `memory root is not a local fixed drive`   | UNC, mapped network, or removable root    | move the memory root to a local fixed drive              |
-| native binding failed to load              | missing or ABI-mismatched prebuild        | use Node 22/24/26 and reinstall                          |
-| worktree memory is separate                | Git could not resolve the common checkout | install Git, shorten the path                            |
-
-## 8. Migration and compatibility
-
-- macOS, Linux, and Termux behavior is unchanged except for the shared normalization helper, which must be a no-op for already-canonical POSIX paths.
-- Project keys already use the canonical project root, so a project alias reuses its existing namespace. The existing migration from the earlier always-hashed layout stays unchanged.
-- No Windows memory exists before this work, so Windows needs no migration.
-- Existing locks and state files stay compatible. Older lock payloads with additional fields are accepted, and ownership still uses the random token.
-
-## 9. Acceptance criteria
-
-### Packaging
-
-- `npm install` of the package on Windows x64 and arm64 resolves `tree-sitter` and `tree-sitter-bash` prebuilds and exits 0.
-- `os` includes `win32`; metadata test passes.
-- A missing binding produces the actionable error, not a raw stack trace.
-
-### Shell
-
-- With Git Bash: six background tools, bash commands run, `rm` deletes memory files.
-- Without Git Bash: five tools, no `bash` in the tool list, no-bash prompt variant, one notice, status `not found`.
-- With `shellPath` pointing at the WSL launcher: bash disabled, status `rejected`.
-- Installing Git Bash mid-session enables bash on the next background run.
-
-### Paths
-
-- `C:\`, `C:/`, `/c/`, `/cygdrive/c/`, `/mnt/c/`, `~`, `~\`, `\\?\` all reach the same file for read, write, edit, and `rm`.
-- Case-different and junction paths are rejected or accepted consistently by one containment primitive.
-- `notes.md:stream.md` is rejected; `FOO.MD` is readable and deletable.
-- A 242-character memory path fails startup with the budget message.
-- A UNC memory root fails startup.
-
-### Storage
-
-- A publish while another handle holds the file retries and then either succeeds or emits the "open in another process" message.
-- A read-only topic retains its content after a failed replacement, can be updated after its attribute is cleared, and can be deleted through Node's native `fs.rm` handling.
-- A junction inside the memory tree is not scanned and cannot be written through.
-- A stale lock with a recycled PID and an old heartbeat is reclaimed.
-
-### CI
-
-- All required `windows-latest` jobs at Node 22/24/26 are green and stable across repeated runs.
-- POSIX-only skips appear with reasons and match the documented list.
-
-### Docs
-
-- Every claim in the privacy wording is true on both platforms.
-- `docs/windows.md` and its `.zh.md` exist and link from the four affected docs.
-- The troubleshooting table's strings match the implementation verbatim.
-
-### End-to-end
-
-Clean Windows 11 x64 VM with no prior Pi state:
-
-1. `pi install git:github.com/fktpp2022/pi-project-memory` succeeds.
-2. Start Pi in a Git repository; the first prompt recalls nothing and shows no error.
-3. `/memory extract` writes a topic and updates `MEMORY.md`.
-4. `/memory dream` completes all provider turns (not one) and sets `lastDreamAt`.
-5. `/memory status` reports `Git Bash: C:\Program Files\Git\bin\bash.exe`.
-6. Temporarily rename `C:\Program Files\Git`; the next background run exposes five tools, shows the one-time notice, and status reports `not found`.
-7. Restore Git Bash; the next background run exposes six tools again.
-8. `pi remove git:github.com/fktpp2022/pi-project-memory` removes the package entry and leaves memory files in place.
-
-## 10. Out of scope
-
-- PowerShell as a background shell or a new read-only PowerShell classifier.
-- Explicit ACL hardening (`icacls` or native ACL APIs).
-- Windows Server.
-- WSL-specific changes; WSL is Linux.
-- A broad cross-platform test rewrite; POSIX-only tests may be skipped explicitly.
-- arm64 CI.
+- PowerShell as a background shell, drive probing, fixed-drive restrictions, and explicit ACL hardening.
+- Automatic storage retries, hardcoded path length budgets, Bash command rewriting, and unrelated lock or POSIX path changes.
+- Windows Server, arm64 CI, WSL-specific behavior changes, and a broad cross-platform test rewrite.
 - An upstream PR without an explicit user request.
 
-## 11. Implementation tickets
-
-One child ticket per workstream, with the matching acceptance criteria copied in:
-
-1. Packaging and install (`os`, install docs)
-2. Shell detection and missing-bash degradation
-3. Path normalization, containment, and restricted-bash operands
-4. Storage, retries, reparse points, and locks
-5. Windows CI, `.gitattributes`, skips, and new tests
-6. Docs and security-claim rewrite, including `.zh.md` parity
-
-Plus [Fix the Windows-only dream transcript assertion](https://github.com/fktpp2022/pi-project-memory/issues/14), which is independent and can land with the CI ticket.
+Implementation work covers packaging, optional Git Bash, Windows paths and no-follow safety, and CI.

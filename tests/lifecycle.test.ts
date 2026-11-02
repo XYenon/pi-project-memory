@@ -402,6 +402,7 @@ test("manual extraction reports task progress and completion even without change
 test("missing Git Bash disables bash, notifies once, and reports the exact status line", async (t) => {
 	if (process.platform !== "win32") return t.skip("Git Bash availability is only probed on Windows");
 	const missing = join(tmpdir(), `pi-memory-missing-bash-${process.pid}-${Date.now()}.exe`);
+	t.after(() => rm(missing, { force: true }));
 	const harness = await createLifecycleHarness(t, {
 		config: {
 			shellPath: missing,
@@ -427,6 +428,8 @@ test("missing Git Bash disables bash, notifies once, and reports the exact statu
 	]);
 	await harness.extension.commands.get("memory")?.handler("extract", harness.context);
 	assert.equal(await readFile(topic, "utf8"), "extracted fact\n");
+	// A changed candidate does not trigger another probe until config reload.
+	await writeFile(missing, "not an executable");
 	harness.faux.setResponses([
 		(context) => {
 			checkTools(context);
@@ -456,6 +459,9 @@ test("missing Git Bash disables bash, notifies once, and reports the exact statu
 	harness.context.mode = "rpc";
 	await harness.extension.commands.get("memory")?.handler("status", harness.context);
 	assert.match(harness.notices.at(-1)?.message ?? "", new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	await harness.extension.commands.get("memory")?.handler("reload-config", harness.context);
+	await harness.extension.commands.get("memory")?.handler("status", harness.context);
+	assert.ok(harness.notices.at(-1)?.message.includes(`Git Bash: rejected (${missing} is not Git Bash)`));
 });
 
 test("Pi lifecycle hooks honor trust, inject memory prompts, and drain shutdown", async (t) => {

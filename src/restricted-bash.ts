@@ -2,12 +2,7 @@ import { realpath } from "node:fs/promises";
 import { posix, win32 } from "node:path";
 import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
 import { classifyReadOnlyBash, parseStaticBashCommand } from "./bash-readonly.ts";
-import {
-	assertBashCwdBudget,
-	assertContainedMarkdown,
-	normalizePathLexical,
-	VCS_METADATA_DIRECTORIES,
-} from "./paths.ts";
+import { assertContainedMarkdown, normalizePathLexical, VCS_METADATA_DIRECTORIES } from "./paths.ts";
 
 export interface RestrictedBashPolicy {
 	memoryDir: string;
@@ -52,13 +47,7 @@ function parseDelete(
 	memoryDir: string,
 	platform: NodeJS.Platform,
 ): { paths: string[]; force: boolean } | undefined {
-	// On Windows the typed command often uses backslash paths, but the bash
-	// grammar treats `\` as an escape, so `C:\Users\...` parses to `C:Users...`
-	// and loses its drive/root. Forward slashes are valid path separators on
-	// Windows, so normalize them before parsing without touching semantics of
-	// flags (which never contain backslashes).
-	const parsedCommand = platform === "win32" ? command.replace(/\\/g, "/") : command;
-	const argv = parseStaticBashCommand(parsedCommand);
+	const argv = parseStaticBashCommand(command);
 	if (argv?.[0] !== "rm") return undefined;
 	const paths: string[] = [];
 	let operands = false;
@@ -102,11 +91,9 @@ export async function prepareRestrictedBash(
 
 	const decision = classifyReadOnlyBash(command, { platform });
 	if (!decision.readOnly) throw new Error(decision.reason);
-	const cwd = await realpath(policy.cwd);
-	assertBashCwdBudget(cwd, platform);
 	return {
 		kind: "execute",
-		cwd,
+		cwd: await realpath(policy.cwd),
 		command,
 		options: { exposeSessionEnvironment: false },
 	};

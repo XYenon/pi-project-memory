@@ -5,17 +5,11 @@ import { join, win32 } from "node:path";
 import test from "node:test";
 import { createChildTools } from "../src/child-tools.ts";
 import { prepareRestrictedBash } from "../src/restricted-bash.ts";
-import { createToolWorkspace, skipOnWindows } from "./helpers.ts";
+import { createToolWorkspace, skipBlockOnWindows } from "./helpers.ts";
 
 test("memory deletion parses escaped spaces, quoted concatenations, and literal special characters", async (t) => {
-	if (
-		skipOnWindows(
-			t,
-			"POSIX-only: this test embeds the native backslash memoryDir unquoted into bash; Git Bash collapses unquoted backslashes, so the operands are not absolute. Forward-slash/MSYS operand forms are covered by the dedicated Windows normalization test.",
-		)
-	)
-		return;
 	const env = await createToolWorkspace(t, "pi-memory-rm-arguments-");
+	const memoryDir = env.memoryDir.replaceAll("\\", "/");
 	const bash = createChildTools({
 		...env,
 		mode: "extractor",
@@ -24,13 +18,14 @@ test("memory deletion parses escaped spaces, quoted concatenations, and literal 
 		touchedPaths: new Set(),
 	}).find((tool) => tool.name === "bash")!;
 	for (const [filename, command] of [
-		["old fact.md", `rm ${env.memoryDir}/old\\ fact.md`],
-		["mixed quote.md", `rm '${env.memoryDir}'/'mixed '"quote".md`],
-		['double "quote".md', `rm "${env.memoryDir}/double \\"quote\\".md"`],
-		["literal $value.md", `rm '${env.memoryDir}/literal $value.md'`],
-		["command name.md", `r""m '${env.memoryDir}/command name.md'`],
-		["linecontinued.md", `rm ${env.memoryDir}/line\\\ncontinued.md`],
+		["old fact.md", `rm ${memoryDir}/old\\ fact.md`],
+		["mixed quote.md", `rm '${memoryDir}'/'mixed '"quote".md`],
+		['double "quote".md', `rm "${memoryDir}/double \\"quote\\".md"`],
+		["literal $value.md", `rm '${memoryDir}/literal $value.md'`],
+		["command name.md", `r""m '${memoryDir}/command name.md'`],
+		["linecontinued.md", `rm ${memoryDir}/line\\\ncontinued.md`],
 	] as const) {
+		if (filename.includes('"') && skipBlockOnWindows(t, "Windows filenames cannot contain double quotes")) continue;
 		const path = join(env.memoryDir, filename);
 		await writeFile(path, "remove this file\n");
 		const prepared = await prepareRestrictedBash(command, { cwd: env.projectRoot, memoryDir: env.memoryDir });
@@ -78,6 +73,10 @@ test("rm normalizes every accepted Windows operand form before containment", asy
 		const prepared = await prepareRestrictedBash(`rm '${operand}'`, { cwd, memoryDir }, "win32");
 		assert.deepEqual(prepared, { kind: "delete", paths: [expected], force: false }, operand);
 	}
+	assert.deepEqual(
+		await prepareRestrictedBash("rm C:/pi-rm-fixture/memory/topic\\ name.md", { cwd, memoryDir }, "win32"),
+		{ kind: "delete", paths: [`${memoryDir}\\topic name.md`], force: false },
+	);
 	const homeMemory = win32.join(homedir(), "pi-rm-home", "memory");
 	const homePrepared = await prepareRestrictedBash(
 		`rm '~/pi-rm-home/memory/topic.md'`,

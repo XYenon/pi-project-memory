@@ -49,7 +49,8 @@ test("memory tool paths follow native tilde, prefix, URL, and space normalizatio
 	assert.equal(memoryPathFromToolInput(memoryDir, "/other", { path: "~/.pi/memory/../outside.md" }), null);
 });
 
-test("memory tool paths recognize aliases for existing and newly created files", async (t) => {
+test("Windows memory tool paths recognize aliases for existing and newly created files", async (t) => {
+	if (process.platform !== "win32") return t.skip("Windows path canonicalization");
 	const root = await createTempDirectory(t, "pi-memory-tool-alias-");
 	const memory = join(root, "memory");
 	const alias = join(root, "alias");
@@ -464,62 +465,23 @@ test("Windows read-only replacement fails safely, while native rm can clear the 
 	assert.deepEqual(await readdir(root), []);
 });
 
-test("storage retries transient sharing violations and preserves files on permanent errors", async (t) => {
-	for (const operation of ["rename", "link", "rm"] as const) {
-		for (const failure of ["transient", "persistent", "fatal"] as const) {
-			await t.test(`${operation} ${failure}`, async (t) => {
-				if (operation === "link" && process.platform === "android") return t.skip("Android uses exclusive copy");
-				const root = await createTempDirectory(t, "pi-memory-retry-");
-				const file = join(await fs.realpath(root), "fact.md");
-				if (operation !== "link") await writeFile(file, "original");
-				const expected = operation === "link" ? null : await baseline(file);
-				const original = fs[operation];
-				let attempts = 0;
-				const code = failure === "fatal" ? "ENOTSUP" : { rename: "EPERM", link: "EACCES", rm: "EBUSY" }[operation];
-				t.mock.method(fs, operation, async (...args: Parameters<typeof original>) => {
-					// Do not interfere with staging-file cleanup.
-					if ((operation === "rm" ? args[0] : args[1]) === file) {
-						attempts++;
-						if (failure !== "transient" || attempts <= 2)
-							throw Object.assign(new Error("injected filesystem error"), { code });
-					}
-					return (original as (...args: unknown[]) => Promise<void>)(...args);
-				});
-				syncBuiltinESMExports();
-				t.after(() => {
-					t.mock.restoreAll();
-					syncBuiltinESMExports();
-				});
-				const result =
-					operation === "rm"
-						? safeDeleteMemoryFile(root, file, undefined)
-						: atomicWriteIfBaseline(file, expected, () => "replacement");
-				if (failure === "transient") await result;
-				else await assert.rejects(result, { code });
-				assert.equal(attempts, failure === "transient" ? 3 : failure === "persistent" ? 5 : 1);
-				const absent = operation === "rm" ? failure === "transient" : operation === "link" && failure !== "transient";
-				if (absent) await assert.rejects(readFile(file), { code: "ENOENT" });
-				else assert.equal(await readFile(file, "utf8"), failure === "transient" ? "replacement" : "original");
-				assert.deepEqual(await readdir(root), absent ? [] : ["fact.md"]);
-			});
-		}
-	}
-});
-
-test("sharing-violation retries stop after mutation permission is revoked", async (t) => {
+test("storage propagates sharing violations without retrying or losing concurrent changes", async (t) => {
 	for (const operation of ["rename", "link", "rm"] as const) {
 		await t.test(operation, async (t) => {
 			if (operation === "link" && process.platform === "android") return t.skip("Android uses exclusive copy");
-			const root = await createTempDirectory(t, "pi-memory-retry-guard-");
-			const filePath = join(await fs.realpath(root), "fact.md");
-			if (operation !== "link") await writeFile(filePath, "original");
-			const expected = operation === "link" ? null : await baseline(filePath);
-			let allowed = true;
+			const root = await createTempDirectory(t, "pi-memory-sharing-error-");
+			const file = join(root, "fact.md");
+			if (operation !== "link") await writeFile(file, "original");
+			const expected = operation === "link" ? null : await baseline(file);
 			const original = fs[operation];
+			const failure = Object.assign(new Error("sharing violation"), {
+				code: { rename: "EPERM", link: "EACCES", rm: "EBUSY" }[operation],
+			});
+			let attempts = 0;
 			t.mock.method(fs, operation, async (...args: Parameters<typeof original>) => {
-				if (allowed) {
-					allowed = false;
-					throw Object.assign(new Error("sharing violation"), { code: "EBUSY" });
+				if ((operation === "rm" ? args[0] : args[1]) === file && ++attempts === 1) {
+					await writeFile(file, "another writer saved this");
+					throw failure;
 				}
 				return (original as (...args: unknown[]) => Promise<void>)(...args);
 			});
@@ -528,17 +490,15 @@ test("sharing-violation retries stop after mutation permission is revoked", asyn
 				t.mock.restoreAll();
 				syncBuiltinESMExports();
 			});
-			const guard = () => {
-				if (!allowed) throw new Error("mutation permission revoked");
-			};
 			await assert.rejects(
 				operation === "rm"
-					? safeDeleteMemoryFile(root, filePath, undefined, undefined, guard)
-					: atomicWriteIfBaseline(filePath, expected, () => "replacement", undefined, guard),
-				/mutation permission revoked/,
+					? safeDeleteMemoryFile(root, file, expected ?? undefined)
+					: atomicWriteIfBaseline(file, expected, () => "replacement"),
+				(error) => error === failure,
 			);
-			if (operation === "link") await assert.rejects(readFile(filePath), { code: "ENOENT" });
-			else assert.equal(await readFile(filePath, "utf8"), "original");
+			assert.equal(attempts, 1);
+			assert.equal(await readFile(file, "utf8"), "another writer saved this");
+			assert.deepEqual(await readdir(root), ["fact.md"]);
 		});
 	}
 });

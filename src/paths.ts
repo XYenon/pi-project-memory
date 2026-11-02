@@ -14,16 +14,8 @@ const execFileAsync = promisify(execFile);
 export const VCS_METADATA_DIRECTORIES = [".git", ".hg", ".svn", ".bzr", ".jj", ".sl"] as const;
 const VCS_METADATA_SET = new Set<string>(VCS_METADATA_DIRECTORIES);
 
-/** Windows keeps the full memory path inside `MAX_PATH - 18` for child tools. */
-export const WINDOWS_MEMORY_PATH_BUDGET = 241;
-/** Generated topic file paths stay under the `spawn` cwd limit of 259 characters. */
-export const WINDOWS_FILE_PATH_BUDGET = 258;
-/** `child_process.spawn` fails with ENOENT at 259 characters of `cwd`. */
-export const WINDOWS_BASH_CWD_BUDGET = 258;
-
 const WINDOWS_DRIVE = /^[a-zA-Z]:/;
 const WINDOWS_ABSOLUTE_DRIVE = /^[a-zA-Z]:[\\/]/;
-const WINDOWS_VARIABLE = /%[^%\\/]+%/;
 
 function stripExtendedPrefix(path: string): string {
 	if (/^\\\\\?\\UNC\\/i.test(path)) return `\\\\${path.slice(8)}`;
@@ -33,19 +25,18 @@ function stripExtendedPrefix(path: string): string {
 }
 
 /** Resolve aliases and on-disk casing, including paths whose final components do not exist yet. */
-export function canonicalPath(path: string, platform: NodeJS.Platform = process.platform): string {
-	const flavor = platform === "win32" ? win32 : posix;
-	const resolved = flavor.resolve(path);
+function canonicalWindowsPath(path: string): string {
+	const resolved = win32.resolve(path);
 	let current = resolved;
 	const suffix: string[] = [];
 	for (;;) {
 		try {
 			const canonical = stripExtendedPrefix(realpathSync.native(current));
-			return flavor.join(canonical, ...suffix);
+			return win32.join(canonical, ...suffix);
 		} catch {}
-		const parent = flavor.dirname(current);
+		const parent = win32.dirname(current);
 		if (parent === current) return resolved;
-		suffix.unshift(flavor.basename(current));
+		suffix.unshift(win32.basename(current));
 		current = parent;
 	}
 }
@@ -58,7 +49,7 @@ export function canonicalPath(path: string, platform: NodeJS.Platform = process.
  */
 export function normalizePathInput(base: string, input: string, platform: NodeJS.Platform = process.platform): string {
 	const lexical = normalizePathLexical(base, input, platform);
-	return platform === "win32" ? canonicalPath(lexical, platform) : lexical;
+	return platform === "win32" ? canonicalWindowsPath(lexical) : lexical;
 }
 
 /**
@@ -74,10 +65,7 @@ export function normalizePathLexical(
 	const windows = platform === "win32";
 	const flavor = windows ? win32 : posix;
 	let path = input.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
-	if (windows) path = path.trim();
 	if (path.startsWith("file://")) path = fileURLToPath(path);
-	if (windows && WINDOWS_VARIABLE.test(path))
-		throw new Error(`Environment variable expansion is not supported: ${input}`);
 	if (path === "~") path = homedir();
 	else if (windows ? /^~[\\/]/.test(path) : path.startsWith("~/")) path = flavor.join(homedir(), path.slice(2));
 	if (!windows) return flavor.resolve(base, path);
@@ -202,7 +190,10 @@ function configuredMemoryDirectory(value: string | null): string | null {
 	}
 	let normalized: string;
 	try {
-		normalized = normalizePathInput(homedir(), expanded).replace(/[\\/]+$/, "");
+		normalized = (process.platform === "win32" ? normalizePathInput(homedir(), expanded) : normalize(expanded)).replace(
+			/[\\/]+$/,
+			"",
+		);
 	} catch {
 		// Invalid forms fall back to the project namespace rather than failing startup.
 		return null;
@@ -279,10 +270,10 @@ async function canonicalNamespacePath(path: string): Promise<string> {
 		try {
 			return join(stripExtendedPrefix(await realpath(current)), ...missing.reverse()).normalize("NFC");
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return normalizePathInput(current, path).normalize("NFC");
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return resolve(path).normalize("NFC");
 		}
 		const parent = dirname(current);
-		if (parent === current) return normalizePathInput(current, path).normalize("NFC");
+		if (parent === current) return resolve(path).normalize("NFC");
 		missing.push(basename(current));
 		current = parent;
 	}
@@ -316,11 +307,9 @@ export async function resolveProjectPaths(
 	const namespace = await projectNamespace(agentMemoryRoot, projectKey, projectRoot);
 	const projectBaseDir = join(projectsRoot, namespace);
 	const configured = configuredMemoryDirectory(autoMemoryDirectory);
-	// Canonicalize once; every later containment check, hash, and display uses this value.
-	const memoryDir = await canonicalNamespacePath(configured ?? join(projectBaseDir, "memory"));
-	assertMemoryPathBudget(memoryDir);
-	await assertLocalFixedMemoryRoot(memoryDir);
-	const memoryNamespace = namespaceHash(memoryDir);
+	let memoryDir = configured ?? join(projectBaseDir, "memory");
+	if (process.platform === "win32") memoryDir = await canonicalNamespacePath(memoryDir);
+	const memoryNamespace = namespaceHash(await canonicalNamespacePath(memoryDir));
 	// Project state remains isolated. Dream cadence and locks use the canonical
 	// memory root so projects mounting one store coordinate maintenance.
 	const baseDir = configured ? join(projectBaseDir, "stores", memoryNamespace) : projectBaseDir;
@@ -357,11 +346,6 @@ export async function initializeProjectPaths(paths: ProjectPaths): Promise<void>
 	const namespaceDir = paths.namespaceDir ?? paths.baseDir;
 	if (!(await reserveNamespace(namespaceDir, paths.projectRoot)))
 		throw new Error("Project memory namespace belongs to a different project root");
-	// Re-canonicalize after creation: a configured root may have been created on a
-	// substituted or differently cased path.
-	paths.memoryDir = await canonicalNamespacePath(paths.memoryDir);
-	assertMemoryPathBudget(paths.memoryDir);
-	await assertLocalFixedMemoryRoot(paths.memoryDir);
 }
 
 export function displayPath(path: string): string {
@@ -406,68 +390,4 @@ export function assertContainedMarkdown(
 	if (!isMarkdownPath(absolute, platform))
 		throw new Error(`Memory writes and deletes require a .md path: ${candidate}`);
 	return absolute;
-}
-
-/** Fail startup when the canonical memory root exceeds the Windows path budget. */
-export function assertMemoryPathBudget(path: string, platform: NodeJS.Platform = process.platform): void {
-	if (platform !== "win32" || path.length <= WINDOWS_MEMORY_PATH_BUDGET) return;
-	throw new Error(
-		`Memory path exceeds the ${WINDOWS_MEMORY_PATH_BUDGET}-character Windows budget (${path.length} characters): ${path}`,
-	);
-}
-
-/** Cap generated topic paths so child tools can still open them. */
-export function assertMemoryFilePathBudget(path: string, platform: NodeJS.Platform = process.platform): void {
-	if (platform !== "win32" || path.length <= WINDOWS_FILE_PATH_BUDGET) return;
-	throw new Error(
-		`Memory file path exceeds the ${WINDOWS_FILE_PATH_BUDGET}-character Windows budget (${path.length} characters): ${path}`,
-	);
-}
-
-/** Refuse a background bash spawn whose working directory cannot start. */
-export function assertBashCwdBudget(cwd: string, platform: NodeJS.Platform = process.platform): void {
-	if (platform !== "win32" || cwd.length <= WINDOWS_BASH_CWD_BUDGET) return;
-	throw new Error(
-		`Background bash refuses a working directory longer than ${WINDOWS_BASH_CWD_BUDGET} characters (${cwd.length} characters): ${cwd}`,
-	);
-}
-
-const DRIVE_TYPE_CACHE = new Map<string, boolean>();
-
-async function driveIsLocalFixed(letter: string): Promise<boolean> {
-	const cached = DRIVE_TYPE_CACHE.get(letter);
-	if (cached !== undefined) return cached;
-	const systemDrive = (process.env.SystemDrive ?? "C:").slice(0, 1).toLowerCase();
-	if (letter.toLowerCase() === systemDrive) {
-		DRIVE_TYPE_CACHE.set(letter, true);
-		return true;
-	}
-	try {
-		// DriveType is a .NET enum name, so the probe is not affected by display language.
-		const { stdout } = await execFileAsync(
-			"powershell.exe",
-			[
-				"-NoProfile",
-				"-NonInteractive",
-				"-Command",
-				`(New-Object System.IO.DriveInfo('${letter}')).DriveType.ToString()`,
-			],
-			{ timeout: 3000, encoding: "utf8", windowsHide: true },
-		);
-		const fixed = stdout.trim() === "Fixed";
-		DRIVE_TYPE_CACHE.set(letter, fixed);
-		return fixed;
-	} catch {
-		return false;
-	}
-}
-
-/** The memory root must be a local fixed drive after `realpath`; UNC is rejected. */
-export async function assertLocalFixedMemoryRoot(
-	path: string,
-	platform: NodeJS.Platform = process.platform,
-): Promise<void> {
-	if (platform !== "win32") return;
-	if (!/^[A-Za-z]:\\/.test(path)) throw new Error(`memory root is not a local fixed drive: ${path}`);
-	if (!(await driveIsLocalFixed(path.charAt(0)))) throw new Error(`memory root is not a local fixed drive: ${path}`);
 }

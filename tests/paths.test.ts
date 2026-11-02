@@ -6,11 +6,7 @@ import { join, win32 } from "node:path";
 import test, { after, before } from "node:test";
 import { promisify } from "node:util";
 import {
-	assertBashCwdBudget,
 	assertContainedMarkdown,
-	assertLocalFixedMemoryRoot,
-	assertMemoryFilePathBudget,
-	assertMemoryPathBudget,
 	containsVcsMetadataSegment,
 	initializeProjectPaths,
 	isContainedPath,
@@ -18,8 +14,6 @@ import {
 	normalizePathInput,
 	resolveProjectPaths,
 	sanitizeProjectKey,
-	WINDOWS_FILE_PATH_BUDGET,
-	WINDOWS_MEMORY_PATH_BUDGET,
 } from "../src/paths.ts";
 import { createTempDirectory, removeTempDirectory, shellPath, skipOnWindows } from "./helpers.ts";
 
@@ -110,7 +104,7 @@ test("custom roots isolate state and share locks by canonical memory namespace",
 	await mkdir(shared);
 	const throughAlias = await resolveProjectPaths(projectTwo, alias);
 	assert.equal(first.locksDir, throughAlias.locksDir);
-	assert.equal(throughAlias.memoryDir, await realpath(shared));
+	assert.equal(throughAlias.memoryDir, alias);
 });
 
 test("namespace reservation rejects a pre-existing symlink before writing a marker", async (t) => {
@@ -260,6 +254,8 @@ test("normalizePathInput maps every accepted Windows form to one canonical drive
 		["/cygdrive/c/pi-windows-path-fixture/memory/a.md", `${root}\\a.md`],
 		["\\\\?\\C:\\pi-windows-path-fixture\\memory\\a.md", `${root}\\a.md`],
 		["\\\\?\\UNC\\server\\share\\a.md", "\\\\server\\share\\a.md"],
+		["%USERPROFILE%\\a.md", "D:\\project\\%USERPROFILE%\\a.md"],
+		[" topic.md", "D:\\project\\ topic.md"],
 	];
 	for (const [input, expected] of cases)
 		assert.equal(normalizePathInput("D:\\project", input, "win32"), expected, input);
@@ -270,11 +266,10 @@ test("normalizePathInput maps every accepted Windows form to one canonical drive
 	assert.equal(normalizePathInput("D:\\project", "~", "win32"), normalizePathInput("D:\\project", homedir(), "win32"));
 });
 
-test("normalizePathInput rejects drive-relative, variable, and stream operands", () => {
+test("normalizePathInput rejects drive-relative and stream operands", () => {
 	for (const [input, message] of [
 		["C:pi-windows-path-fixture\\a.md", /drive-relative/i],
 		["C:", /drive-relative/i],
-		["%USERPROFILE%\\pi-windows-path-fixture\\a.md", /variable/i],
 		["C:\\mem\\notes.md:stream.md", /data streams/i],
 		["C:\\mem\\a.md::$DATA", /data streams/i],
 	] as const)
@@ -316,42 +311,6 @@ test("isMarkdownPath matches the index and topics case-insensitively on Windows"
 	assert.equal(isMarkdownPath("foo.md", "linux"), true);
 });
 
-test("the Windows memory path budget is 241 characters and POSIX is unbounded", () => {
-	const within = `C:\\${"a".repeat(WINDOWS_MEMORY_PATH_BUDGET - 3)}`;
-	assert.equal(within.length, WINDOWS_MEMORY_PATH_BUDGET);
-	assert.doesNotThrow(() => assertMemoryPathBudget(within, "win32"));
-	const over = `${within}a`;
-	assert.throws(() => assertMemoryPathBudget(over, "win32"), /budget/);
-	assert.throws(() => assertMemoryPathBudget(over, "win32"), new RegExp(over.replace(/\\/g, "\\\\")));
-	assert.doesNotThrow(() => assertMemoryPathBudget(over, "linux"));
-	const longFile = `C:\\memory\\${"b".repeat(WINDOWS_FILE_PATH_BUDGET - 12)}.md`;
-	assert.equal(longFile.length, WINDOWS_FILE_PATH_BUDGET + 1);
-	assert.throws(() => assertMemoryFilePathBudget(longFile, "win32"), /budget/);
-	assert.doesNotThrow(() => assertMemoryFilePathBudget(longFile, "linux"));
-	assert.throws(() => assertBashCwdBudget(longFile, "win32"), /258/);
-	assert.doesNotThrow(() => assertBashCwdBudget(longFile, "linux"));
-});
-
-test("startup enforces the Windows memory path budget on the canonical root", async (t) => {
-	const root = await createTempDirectory(t, "pi-memory-budget-");
-	const longMemory = join(root, "m".repeat(220));
-	const paths = {
-		projectRoot: root,
-		projectKey: "budget",
-		baseDir: join(root, "state"),
-		memoryDir: longMemory,
-		stateFile: join(root, "state.json"),
-		locksDir: join(root, "locks"),
-	};
-	if (process.platform === "win32") {
-		await assert.rejects(initializeProjectPaths(paths), (error: Error) => {
-			assert.match(error.message, /budget/);
-			assert.ok(error.message.includes(longMemory));
-			return true;
-		});
-	} else await initializeProjectPaths(paths);
-});
-
 test("a project alias reuses its existing canonical namespace and memory", async (t) => {
 	const root = await createTempDirectory(t, "pi-memory-alias-namespace-");
 	const project = join(root, "project");
@@ -366,28 +325,4 @@ test("a project alias reuses its existing canonical namespace and memory", async
 	assert.equal(await readFile(join(linked.memoryDir, "fact.md"), "utf8"), "existing memory\n");
 	// Remove the junction before the recursive temp-directory teardown.
 	await rm(alias, { force: true });
-});
-
-test("the memory root policy rejects UNC and non-fixed drives at startup", async () => {
-	await assert.rejects(
-		assertLocalFixedMemoryRoot("\\\\server\\share\\memory", "win32"),
-		/memory root is not a local fixed drive/,
-	);
-	await assertLocalFixedMemoryRoot(`${process.env.SystemDrive ?? "C:"}\\memory`, "win32");
-	await assertLocalFixedMemoryRoot("/memory", "linux");
-});
-
-test("the memory root policy rejects a drive when its type cannot be probed", async () => {
-	const previousPath = process.env.PATH;
-	try {
-		process.env.PATH = "";
-		const drive = process.env.SystemDrive?.toUpperCase() === "Z:" ? "Y" : "Z";
-		await assert.rejects(
-			assertLocalFixedMemoryRoot(`${drive}:\\memory`, "win32"),
-			/memory root is not a local fixed drive/,
-		);
-	} finally {
-		if (previousPath === undefined) delete process.env.PATH;
-		else process.env.PATH = previousPath;
-	}
 });

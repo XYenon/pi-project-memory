@@ -17,7 +17,6 @@ import {
 import fg from "fast-glob";
 import {
 	assertContainedMarkdown,
-	assertMemoryFilePathBudget,
 	isContainedPath,
 	normalizePathLexical,
 	resolveToolPath,
@@ -123,7 +122,6 @@ async function resolveWritablePath(
 	// Keep memory-internal symlinks intact: `resolveToolPath` would resolve a link
 	// to its target, which makes deletes of a link delete the target instead.
 	const absolute = assertContainedMarkdown(env.memoryDir, normalizePathLexical(env.cwd, rawPath));
-	if (followTarget) assertMemoryFilePathBudget(absolute);
 	const canonicalMemoryRoot = await realpath(env.memoryDir);
 	const expected = resolve(canonicalMemoryRoot, relative(resolve(env.memoryDir), absolute));
 	await ensureSafeParentDirectories(canonicalMemoryRoot, dirname(expected));

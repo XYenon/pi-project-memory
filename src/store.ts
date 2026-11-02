@@ -19,13 +19,12 @@ import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import fg from "fast-glob";
 import YAML from "yaml";
 import {
-	canonicalPath,
 	canonicalProjectRoot,
 	containsVcsMetadataSegment,
 	isContainedPath,
 	isMarkdownPath,
-	normalizePathLexical,
 	rejectReparsePathAncestor,
+	resolveToolPath,
 	VCS_METADATA_DIRECTORIES,
 } from "./paths.ts";
 import { hasUnsafeMemoryText } from "./sanitize.ts";
@@ -47,24 +46,6 @@ const DEFAULT_STATE: ProjectMemoryState = {
 	schemaVersion: 1,
 	lastDreamAt: 0,
 };
-
-/** Windows locking codes: retry only these for idempotent steps. */
-const RETRYABLE_LOCK_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
-
-/** Retry sharing violations up to five times, revalidating permission before each attempt. */
-async function retryIdempotent(operation: () => Promise<void>, guard?: () => void | Promise<void>): Promise<void> {
-	for (let attempt = 0; ; attempt++) {
-		await guard?.();
-		try {
-			return await operation();
-		} catch (error) {
-			const code = (error as NodeJS.ErrnoException).code;
-			if (!code || !RETRYABLE_LOCK_CODES.has(code) || attempt === 4) throw error;
-			const delay = 50 * 2 ** attempt + Math.random() * 50;
-			await new Promise((resolve) => setTimeout(resolve, delay));
-		}
-	}
-}
 
 export function sha256(content: string | Buffer): string {
 	return createHash("sha256").update(content).digest("hex");
@@ -448,24 +429,19 @@ async function publishFile(
 		} finally {
 			await handle.close();
 		}
+		await beforeRename?.();
 		if (exclusiveCreate) {
 			try {
 				// Android SELinux can prohibit hard links even in Termux's private storage.
 				// Exclusive copying still refuses existing targets, but is not atomic for readers.
-				if (process.platform === "android") {
-					await beforeRename?.();
-					await copyFile(temporary, filePath, constants.COPYFILE_EXCL);
-				} else {
-					await retryIdempotent(() => link(temporary, filePath), beforeRename);
-				}
+				if (process.platform === "android") await copyFile(temporary, filePath, constants.COPYFILE_EXCL);
+				else await link(temporary, filePath);
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
 				throw error;
 			}
 			await rm(temporary);
-		} else {
-			await retryIdempotent(() => rename(temporary, filePath), beforeRename);
-		}
+		} else await rename(temporary, filePath);
 		return true;
 	} finally {
 		await rm(temporary, { force: true }).catch(() => {});
@@ -666,7 +642,6 @@ interface LockOwner {
 }
 
 function processIsAlive(pid: number): boolean {
-	if (pid === 0) return false;
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -936,12 +911,12 @@ export function memoryPathFromToolInput(memoryDir: string, cwd: string, input: R
 	if (!raw) return null;
 	let absolute: string;
 	try {
-		absolute = canonicalPath(normalizePathLexical(cwd, raw));
+		absolute = resolveToolPath(cwd, raw);
 	} catch {
-		// Unsafe forms (drive-relative, expanded variables, ADS) never enter memory.
+		// Unsafe Windows forms (drive-relative paths and ADS) never enter memory.
 		return null;
 	}
-	return isContainedPath(canonicalPath(memoryDir), absolute) ? absolute : null;
+	return isContainedPath(memoryDir, absolute) ? absolute : null;
 }
 
 export function topicCatalog(topics: MemoryTopic[]): string {
@@ -962,18 +937,18 @@ export async function safeDeleteMemoryFile(
 	guard?: () => void | Promise<void>,
 ): Promise<void> {
 	const [canonicalRoot, canonicalParent] = await Promise.all([realpath(memoryDir), realpath(dirname(filePath))]);
-	// Resolve the parent only, so rm unlinks the final entry rather than its target.
-	const deleteTarget = join(canonicalParent, basename(filePath));
-	if (!isContainedPath(canonicalRoot, deleteTarget) || !isMarkdownPath(deleteTarget))
+	const canonicalFile = join(canonicalParent, basename(filePath));
+	if (!isContainedPath(canonicalRoot, canonicalFile) || !isMarkdownPath(canonicalFile))
 		throw new Error("delete target is outside memory or is not a .md file");
 	const release = lockFile ? await acquireLock(lockFile, 15 * 60_000) : undefined;
-	if (lockFile && !release) throw new Error(`Another memory writer is modifying ${deleteTarget}`);
+	if (lockFile && !release) throw new Error(`Another memory writer is modifying ${canonicalFile}`);
 	try {
 		await guard?.();
-		await withFileMutationQueue(deleteTarget, async () => {
-			if (expected && !sameBaseline(await baseline(deleteTarget), expected))
-				throw new Error(`File changed since it was read: ${deleteTarget}. Read it again before deleting.`);
-			await retryIdempotent(() => rm(deleteTarget), guard);
+		await withFileMutationQueue(canonicalFile, async () => {
+			if (expected && !sameBaseline(await baseline(canonicalFile), expected))
+				throw new Error(`File changed since it was read: ${canonicalFile}. Read it again before deleting.`);
+			await guard?.();
+			await rm(canonicalFile);
 		});
 	} finally {
 		await release?.();

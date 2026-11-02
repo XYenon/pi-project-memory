@@ -148,7 +148,7 @@ interface RuntimeState {
 	shutdownTimedOut: boolean;
 	selectorWarningShown: boolean;
 	recallWarningShown: boolean;
-	/** Probe result from the most recent background run, or a status-time probe. */
+	/** Cached until config reload or session restart. */
 	shell?: ShellAvailability;
 	shellNoticeShown: boolean;
 	lastDreamScanAt: number;
@@ -1170,7 +1170,7 @@ async function scheduleExtraction(
 		if (abandoned()) return "failed";
 		const topics = await scanTopics(paths.memoryDir);
 		if (abandoned()) return "failed";
-		const shell = await refreshShell(ctx, state);
+		const shell = await backgroundShell(ctx, state);
 		if (abandoned()) return "failed";
 		const recentLimit =
 			state.config.extraction.recentMessages === "inherit"
@@ -1317,7 +1317,7 @@ async function maybeDream(ctx: ExtensionContext, state: RuntimeState, manual: bo
 			return;
 		}
 		state.dreamAbortController = abortController;
-		const shell = await refreshShell(ctx, state);
+		const shell = await backgroundShell(ctx, state);
 		const dreamSource = sanitizeRecentMessages(
 			ctx.sessionManager.buildSessionProjection().messages,
 			Number.POSITIVE_INFINITY,
@@ -1572,13 +1572,9 @@ function staleMemoryToolReminder(mtimeMs: number): string {
 	return warning ? `<system-reminder>\n${warning}\n</system-reminder>` : "";
 }
 
-/**
- * Re-probe once at the start of each background run. The tool set and prompt are
- * frozen for that run; a missing shell only turns future runs into no-bash runs.
- */
-async function refreshShell(ctx: ExtensionContext, state: RuntimeState): Promise<ShellAvailability> {
-	const shell = await probeShell({ shellPath: state.config.shellPath });
-	state.shell = shell;
+async function backgroundShell(ctx: ExtensionContext, state: RuntimeState): Promise<ShellAvailability> {
+	state.shell ??= await probeShell({ shellPath: state.config.shellPath });
+	const shell = state.shell;
 	if (!shell.available && !state.shellNoticeShown && ctx.mode === "tui") {
 		state.shellNoticeShown = true;
 		ctx.ui.notify(shellStatusLine(shell), "warning");
