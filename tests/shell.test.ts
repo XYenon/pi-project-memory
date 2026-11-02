@@ -14,16 +14,12 @@ function fakeProbe(options: {
 	platform?: NodeJS.Platform;
 }) {
 	const validated: string[] = [];
-	const checked: string[] = [];
 	const whereCalls: string[] = [];
 	const result = probeShell({
 		platform: options.platform ?? "win32",
 		env: { LOCALAPPDATA: options.localAppData ?? "C:\\Users\\test\\AppData\\Local" },
 		shellPath: options.shellPath ?? null,
-		exists: async (path) => {
-			checked.push(path);
-			return path in options.sources;
-		},
+		exists: async (path) => path in options.sources,
 		findOnPath: async (name) => {
 			whereCalls.push(name);
 			return options.where ?? [];
@@ -33,7 +29,7 @@ function fakeProbe(options: {
 			return options.sources[path];
 		},
 	});
-	return { result, validated, checked, whereCalls };
+	return { result, validated, whereCalls };
 }
 
 test("probe follows Git for Windows locations in order and validates each candidate", async () => {
@@ -96,7 +92,7 @@ test("a where candidate that resolves to WSL is reported as rejected", async () 
 
 test("non-Windows keeps the existing bash behavior without Git Bash validation", async () => {
 	const { result, validated } = fakeProbe({ platform: "linux", sources: {} });
-	assert.deepEqual(await result, { available: true, path: "bash" });
+	assert.deepEqual(await result, { available: true });
 	assert.deepEqual(validated, []);
 });
 

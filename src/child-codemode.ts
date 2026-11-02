@@ -83,9 +83,7 @@ export function backgroundToolPrompt(
 		...tools.map((tool) => `- ${tool.name}: ${tool.description}`),
 		...(codemode
 			? [
-					hasBash
-						? "Codemode can call only this task's read, find, grep, write, edit, and restricted bash tools. Their access, read-baseline, trust, and generation checks also apply inside scripts. Store values last only for this background task."
-						: "Codemode can call only this task's read, find, grep, write, and edit tools. Their access, read-baseline, trust, and generation checks also apply inside scripts. Shell access is unavailable in this run. Store values last only for this background task.",
+					`Codemode can call only this task's read, find, grep, write, ${hasBash ? "edit, and restricted bash" : "and edit"} tools. Their access, read-baseline, trust, and generation checks also apply inside scripts.${hasBash ? "" : " Shell access is unavailable in this run."} Store values last only for this background task.`,
 					"Use codemode to batch independent calls with Promise.allSettled, chain dependent calls, or filter large results. Await every call whose result or effects are needed.",
 				]
 			: []),

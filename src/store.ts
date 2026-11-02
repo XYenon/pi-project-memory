@@ -15,17 +15,17 @@ import {
 	utimes,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { hostname } from "node:os";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import fg from "fast-glob";
 import YAML from "yaml";
 import {
+	canonicalPath,
 	canonicalProjectRoot,
 	containsVcsMetadataSegment,
 	isContainedPath,
 	isMarkdownPath,
+	normalizePathLexical,
 	rejectReparsePathAncestor,
-	resolveToolPath,
 	VCS_METADATA_DIRECTORIES,
 } from "./paths.ts";
 import { hasUnsafeMemoryText } from "./sanitize.ts";
@@ -41,6 +41,8 @@ export const TOPIC_BYTE_CAP = 4096;
 export const TOPIC_SCAN_CAP = 200;
 const TOPIC_SCAN_CONCURRENCY = 16;
 
+const NO_FOLLOW_READ = constants.O_RDONLY | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0));
+
 const DEFAULT_STATE: ProjectMemoryState = {
 	schemaVersion: 1,
 	lastDreamAt: 0,
@@ -49,43 +51,19 @@ const DEFAULT_STATE: ProjectMemoryState = {
 /** Windows locking codes: retry only these for idempotent steps. */
 const RETRYABLE_LOCK_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
 
-/** Process-wide start-time token used in lock payloads to identify a process start. */
-const PROCESS_START_TOKEN = randomUUID();
-
-/**
- * Retry an idempotent operation with bounded exponential backoff and jitter.
- * Only EPERM, EBUSY, and EACCES are retried; other errors propagate immediately.
- * 5 attempts, base 50ms, max 800ms, with random jitter up to base.
- */
-async function retryIdempotent<T>(operation: () => Promise<T>, label: string): Promise<T> {
-	const attempts = 5;
-	const baseDelayMs = 50;
-	let lastError: NodeJS.ErrnoException | undefined;
-
-	for (let attempt = 1; attempt <= attempts; attempt++) {
+/** Retry sharing violations up to five times, revalidating permission before each attempt. */
+async function retryIdempotent(operation: () => Promise<void>, guard?: () => void | Promise<void>): Promise<void> {
+	for (let attempt = 0; ; attempt++) {
+		await guard?.();
 		try {
 			return await operation();
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
-			if (!code || !RETRYABLE_LOCK_CODES.has(code) || attempt >= attempts) {
-				lastError = error as NodeJS.ErrnoException;
-				throw error;
-			}
-			// Exponential backoff with jitter
-			const delay = baseDelayMs * (2 ** (attempt - 1)) + Math.random() * baseDelayMs;
+			if (!code || !RETRYABLE_LOCK_CODES.has(code) || attempt === 4) throw error;
+			const delay = 50 * 2 ** attempt + Math.random() * 50;
 			await new Promise((resolve) => setTimeout(resolve, delay));
 		}
 	}
-	// Should never reach here, but TypeScript needs exhaustiveness
-	throw lastError ?? new Error(`${label} failed after retries with unknown error`);
-}
-
-interface LockOwner {
-	pid: number;
-	token: string;
-	acquiredAt: number;
-	startToken: string;
-	hostname: string;
 }
 
 export function sha256(content: string | Buffer): string {
@@ -109,7 +87,7 @@ export function truncateIndex(raw: string): string {
 
 export async function readRegularFileNoFollow(filePath: string): Promise<string> {
 	await rejectReparsePathAncestor(filePath);
-	const handle = await open(filePath);
+	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const before = await handle.stat();
 		if (!before.isFile()) throw new Error(`Not a regular file: ${filePath}`);
@@ -132,13 +110,7 @@ export function isIndexFilename(name: string, platform: NodeJS.Platform = proces
 /** Only the root index is reserved; a nested file with the same name stays a topic. */
 function isMemoryIndexPath(relativePath: string, platform: NodeJS.Platform = process.platform): boolean {
 	const normalized = relativePath.split(sep).join("/");
-	if (normalized.includes("/")) return false;
-	return platform === "win32" ? normalized.toLowerCase() === INDEX_FILE.toLowerCase() : normalized === INDEX_FILE;
-}
-
-function topicTitle(filename: string): string {
-	const base = basename(filename);
-	return process.platform === "win32" ? base.replace(/\.md$/i, "") : basename(base, ".md");
+	return !normalized.includes("/") && isIndexFilename(normalized, platform);
 }
 
 function indexableFilename(filename: string): boolean {
@@ -149,7 +121,7 @@ function indexableFilename(filename: string): boolean {
 function indexEntry(topic: MemoryTopic): string | null {
 	const filename = topic.filename.split(sep).join("/");
 	if (!indexableFilename(filename)) return null;
-	const title = topicTitle(filename);
+	const title = process.platform === "win32" ? basename(filename).replace(/\.md$/i, "") : basename(filename, ".md");
 	const prefix = `- [${title}](${filename})`;
 	const description = topic.description.replace(/\s+/g, " ").trim();
 	const remaining = 150 - prefix.length - 3;
@@ -250,22 +222,12 @@ async function scanTopicsInternal(
 		unique: true,
 		caseSensitiveMatch: process.platform !== "win32",
 	});
-	const seen = new Set<string>();
-	const filenames = relativePaths
-		.filter(
-			(path) =>
-				!isMemoryIndexPath(path) &&
-				includeFilename(path) &&
-				!path.split("/").some((part) => RESERVED_MEMORY_DIRECTORIES.has(part.toLowerCase())),
-		)
-		.filter((path) => {
-			// NTFS is case-insensitive; compare-canonical paths so a case-different
-			// alias cannot appear twice in the catalog.
-			const key = process.platform === "win32" ? resolve(memoryDir, path).toLowerCase() : path;
-			if (seen.has(key)) return false;
-			seen.add(key);
-			return true;
-		});
+	const filenames = relativePaths.filter(
+		(path) =>
+			!isMemoryIndexPath(path) &&
+			includeFilename(path) &&
+			!path.split("/").some((part) => RESERVED_MEMORY_DIRECTORIES.has(part.toLowerCase())),
+	);
 	const topics: MemoryTopic[] = [];
 	for (let offset = 0; offset < filenames.length; offset += TOPIC_SCAN_CONCURRENCY) {
 		// A failed topic head is omitted, matching Claude's partial catalog scan.
@@ -437,7 +399,7 @@ export function lintMemoryContent(
 
 async function fileSnapshot(filePath: string): Promise<{ content: string; baseline: ReadBaseline }> {
 	await rejectReparsePathAncestor(filePath);
-	const handle = await open(filePath);
+	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const before = await handle.stat();
 		if (!before.isFile()) throw new Error(`Not a regular file: ${filePath}`);
@@ -486,30 +448,23 @@ async function publishFile(
 		} finally {
 			await handle.close();
 		}
-		await beforeRename?.();
 		if (exclusiveCreate) {
 			try {
 				// Android SELinux can prohibit hard links even in Termux's private storage.
 				// Exclusive copying still refuses existing targets, but is not atomic for readers.
-				if (process.platform === "android") await copyFile(temporary, filePath, constants.COPYFILE_EXCL);
-				else {
-					// Retry hard link creation for locking errors
-					await retryIdempotent(() => link(temporary, filePath), "hard link");
+				if (process.platform === "android") {
+					await beforeRename?.();
+					await copyFile(temporary, filePath, constants.COPYFILE_EXCL);
+				} else {
+					await retryIdempotent(() => link(temporary, filePath), beforeRename);
 				}
 			} catch (error) {
-				const code = (error as NodeJS.ErrnoException).code;
-				if (code === "EEXIST") return false;
-				if (code === "EPERM" || code === "ENOSYS" || code === "ENOTSUP" || code === "EXDEV") {
-					throw new Error(
-						`Hard link failed for ${filePath} (${code}): use a different filesystem or check write permissions`,
-					);
-				}
+				if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
 				throw error;
 			}
 			await rm(temporary);
 		} else {
-			// Rename may hit EPERM on open handles; retry
-			await retryIdempotent(() => rename(temporary, filePath), "rename");
+			await retryIdempotent(() => rename(temporary, filePath), beforeRename);
 		}
 		return true;
 	} finally {
@@ -567,7 +522,7 @@ async function readStateFile(filePath: string): Promise<ProjectMemoryState | und
 	let handle: Awaited<ReturnType<typeof open>>;
 	try {
 		await rejectReparsePathAncestor(filePath);
-		handle = await open(filePath);
+		handle = await open(filePath, NO_FOLLOW_READ);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw error;
@@ -642,7 +597,7 @@ const SESSION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
 async function readSessionHeader(filePath: string): Promise<{ id: string; cwd?: string; mtimeMs: number } | undefined> {
 	await rejectReparsePathAncestor(filePath);
-	const handle = await open(filePath);
+	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const info = await handle.stat();
 		if (!info.isFile()) return undefined;
@@ -704,6 +659,12 @@ async function canonicalSessionProjectRoot(cwd: string): Promise<string | undefi
 	}
 }
 
+interface LockOwner {
+	pid: number;
+	token: string;
+	acquiredAt: number;
+}
+
 function processIsAlive(pid: number): boolean {
 	if (pid === 0) return false;
 	try {
@@ -714,25 +675,11 @@ function processIsAlive(pid: number): boolean {
 	}
 }
 
-interface LockOwner {
-	pid: number;
-	token: string;
-	acquiredAt: number;
-	startToken: string;
-	hostname: string;
-}
-
 async function readLockOwner(lockFile: string): Promise<LockOwner | undefined> {
 	try {
 		const parsed = JSON.parse(await readRegularFileNoFollow(lockFile)) as Partial<LockOwner>;
 		return Number.isSafeInteger(parsed.pid) && typeof parsed.token === "string" && Number.isFinite(parsed.acquiredAt)
-			? {
-					pid: Number(parsed.pid),
-					token: parsed.token,
-					acquiredAt: Number(parsed.acquiredAt),
-					startToken: typeof parsed.startToken === "string" ? parsed.startToken : "",
-					hostname: typeof parsed.hostname === "string" ? parsed.hostname : "",
-			  }
+			? { pid: Number(parsed.pid), token: parsed.token, acquiredAt: Number(parsed.acquiredAt) }
 			: undefined;
 	} catch {
 		return undefined;
@@ -810,13 +757,7 @@ export async function acquireLock(lockFile: string, staleMs: number): Promise<Lo
 	const lockDirectoryInfo = await lstat(lockDirectory);
 	if (!lockDirectoryInfo.isDirectory() || lockDirectoryInfo.isSymbolicLink())
 		throw new Error(`Lock directory must be a real directory: ${lockDirectory}`);
-	const owner: LockOwner = {
-		pid: process.pid,
-		token: randomUUID(),
-		acquiredAt: Date.now(),
-		startToken: PROCESS_START_TOKEN,
-		hostname: hostname(),
-	};
+	const owner: LockOwner = { pid: process.pid, token: randomUUID(), acquiredAt: Date.now() };
 	const recoveryFile = `${lockFile}.recover`;
 	// A recovery claim serializes stale-owner takeover. A malformed claim fails
 	// closed while fresh, then becomes reclaimable like another stale lock.
@@ -893,7 +834,7 @@ async function markdownSnapshotEntry(
 	previous?: MarkdownSnapshotEntry,
 ): Promise<MarkdownSnapshotEntry> {
 	await rejectReparsePathAncestor(filePath);
-	const handle = await open(filePath);
+	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const before = await handle.stat();
 		if (!before.isFile()) throw new Error(`Not a regular file: ${filePath}`);
@@ -928,7 +869,8 @@ export async function readMarkdownFileSnapshot(
 ): Promise<{ content: string; snapshot: MarkdownSnapshotEntry } | undefined> {
 	const absolute = markdownAbsolutePath(memoryDir, relativePath);
 	if (!absolute) return undefined;
-	const handle = await open(absolute).catch(() => undefined);
+	await rejectReparsePathAncestor(absolute);
+	const handle = await open(absolute, NO_FOLLOW_READ).catch(() => undefined);
 	if (!handle) return undefined;
 	try {
 		const before = await handle.stat();
@@ -994,12 +936,12 @@ export function memoryPathFromToolInput(memoryDir: string, cwd: string, input: R
 	if (!raw) return null;
 	let absolute: string;
 	try {
-		absolute = resolveToolPath(cwd, raw);
+		absolute = canonicalPath(normalizePathLexical(cwd, raw));
 	} catch {
 		// Unsafe forms (drive-relative, expanded variables, ADS) never enter memory.
 		return null;
 	}
-	return isContainedPath(memoryDir, absolute) ? absolute : null;
+	return isContainedPath(canonicalPath(memoryDir), absolute) ? absolute : null;
 }
 
 export function topicCatalog(topics: MemoryTopic[]): string {
@@ -1020,11 +962,8 @@ export async function safeDeleteMemoryFile(
 	guard?: () => void | Promise<void>,
 ): Promise<void> {
 	const [canonicalRoot, canonicalParent] = await Promise.all([realpath(memoryDir), realpath(dirname(filePath))]);
-	// Keep the requested file itself intact when it is a symlink; do not follow it.
-	const deleteTarget = await lstat(filePath).then(
-		(info) => (info.isSymbolicLink() ? filePath : join(canonicalParent, basename(filePath))),
-		() => join(canonicalParent, basename(filePath)),
-	);
+	// Resolve the parent only, so rm unlinks the final entry rather than its target.
+	const deleteTarget = join(canonicalParent, basename(filePath));
 	if (!isContainedPath(canonicalRoot, deleteTarget) || !isMarkdownPath(deleteTarget))
 		throw new Error("delete target is outside memory or is not a .md file");
 	const release = lockFile ? await acquireLock(lockFile, 15 * 60_000) : undefined;
@@ -1034,9 +973,7 @@ export async function safeDeleteMemoryFile(
 		await withFileMutationQueue(deleteTarget, async () => {
 			if (expected && !sameBaseline(await baseline(deleteTarget), expected))
 				throw new Error(`File changed since it was read: ${deleteTarget}. Read it again before deleting.`);
-			await guard?.();
-			// Retry delete for Windows locking errors
-			await retryIdempotent(() => rm(deleteTarget), "delete");
+			await retryIdempotent(() => rm(deleteTarget), guard);
 		});
 	} finally {
 		await release?.();

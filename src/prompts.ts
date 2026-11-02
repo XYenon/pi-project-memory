@@ -216,12 +216,9 @@ export function extractionPrompt(
 		topics.length > 0
 			? `\n\n## Existing memory files\n\n${sanitizeMemoryText(topicCatalog(topics))}\n\nCheck this list before writing — update an existing file rather than creating a duplicate.`
 			: "";
-	const availableTools = hasBash
-		? "Available tools: read, grep, find, read-only bash (ls/find/cat/stat/wc/head/tail and similar), and edit/write for paths inside the memory directory only, and bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f). All other tools — MCP, Agent, write-capable bash, etc — will be denied."
-		: "Available tools: read, grep, find, and edit/write for paths inside the memory directory only. Shell access is unavailable in this run, so bash commands cannot be used. All other tools — MCP, Agent, etc — will be denied.";
 	return `You are now acting as the memory extraction subagent. Analyze the most recent ~${recentMessages} messages above and use them to update your persistent memory systems.
 
-${availableTools}
+Available tools: read, grep, find, ${hasBash ? "read-only bash (ls/find/cat/stat/wc/head/tail and similar), " : ""}and edit/write for paths inside the memory directory only${hasBash ? ", and bash rm of .md files inside the memory directory only (outside protected subdirectories like .git or agents; rm takes no flags except -f)" : ""}.${hasBash ? "" : " Shell access is unavailable in this run, so bash commands cannot be used."} All other tools — MCP, Agent, ${hasBash ? "write-capable bash, " : ""}etc — will be denied.
 
 You have a limited turn budget. edit requires a prior read of the same file, so the efficient strategy is: turn 1 — issue all read calls in parallel for every file you might update; turn 2 — issue all write/edit calls in parallel. Do not interleave reads and writes across multiple turns.
 
@@ -236,15 +233,6 @@ Apply the memory types, what-not-to-save criteria, and frontmatter format from t
 
 export function dreamPrompt(paths: ProjectPaths, sessionDir: string, sessionIds: string[], hasBash = true): string {
 	const sessions = sessionIds.map((id) => `- ${sanitizeMemoryText(id)}`).join("\n");
-	const orient = hasBash
-		? "- `ls` the memory directory to see what already exists"
-		: "- use the find tool to list the memory directory";
-	const transcriptSearch = hasBash
-		? `   \`grep -rn "<narrow term>" ${sessionDir}/ --include="*.jsonl" | tail -50\``
-		: `   use the grep tool with pattern "<narrow term>" and path ${sessionDir}, limited to *.jsonl files`;
-	const toolConstraints = hasBash
-		? "**Tool constraints for this run:** Shell access is restricted to read-only commands (`ls`, `find`, `grep`, `cat`, `stat`, `wc`, `head`, `tail`, and similar) plus deleting `.md` files inside the memory directory (outside protected subdirectories like `.git` or `agents`; `rm` takes no flags except `-f`). Anything else that writes, redirects to a file, or modifies state will be denied. Plan your exploration with this in mind."
-		: "**Tool constraints for this run:** Shell access is unavailable in this run, so bash commands cannot be used. Writing is limited to edit/write for paths inside the memory directory. Plan your exploration with this in mind.";
 	return `# Dream: Memory Consolidation
 
 You are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.
@@ -258,7 +246,7 @@ Session transcripts: ${inlineCodePath(sessionDir)} (large JSONL files — grep n
 
 ## Phase 1 — Orient
 
-${orient}
+- ${hasBash ? "`ls` the memory directory to see what already exists" : "use the find tool to list the memory directory"}
 - read \`MEMORY.md\` to understand the current index
 - Skim existing topic files so you improve them rather than creating duplicates
 - If a \`sessions/\` subdirectory exists, review recent entries there
@@ -269,7 +257,7 @@ Look for new information worth persisting. Sources in rough priority order:
 
 1. **Existing memories that drifted** — facts that contradict something you see in the codebase now
 2. **Transcript search** — if you need specific context (e.g., "what was the error message from yesterday's build failure?"), grep the JSONL transcripts for narrow terms:
-${transcriptSearch}
+   ${hasBash ? `\`grep -rn "<narrow term>" ${sessionDir}/ --include="*.jsonl" | tail -50\`` : `use the grep tool with pattern "<narrow term>" and path ${sessionDir}, limited to *.jsonl files`}
 
 Don't exhaustively read transcripts. Look only for things you already suspect matter.
 
@@ -307,7 +295,7 @@ Return a brief summary of what you consolidated, updated, or pruned. If nothing 
 
 ## Additional context
 
-${toolConstraints}
+**Tool constraints for this run:** Shell access is ${hasBash ? "restricted to read-only commands (`ls`, `find`, `grep`, `cat`, `stat`, `wc`, `head`, `tail`, and similar) plus deleting `.md` files inside the memory directory (outside protected subdirectories like `.git` or `agents`; `rm` takes no flags except `-f`). Anything else that writes, redirects to a file, or modifies state will be denied." : "unavailable in this run, so bash commands cannot be used. Writing is limited to edit/write for paths inside the memory directory."} Plan your exploration with this in mind.
 
 Sessions since last consolidation (${sessionIds.length}):
 ${sessions}`;

@@ -14,7 +14,7 @@ const VALIDATION_TIMEOUT_MS = 5_000;
 export type ShellRejectionDetail = "wsl" | "invalid" | "missing";
 
 export type ShellAvailability =
-	| { available: true; path: string }
+	| { available: true; path?: string }
 	| { available: false; reason: "not-found" }
 	| { available: false; reason: "rejected"; path: string; detail: ShellRejectionDetail };
 
@@ -90,14 +90,7 @@ export async function probeShell(options: ShellProbeOptions = {}): Promise<Shell
 	const validate = options.validate ?? defaultValidate;
 	const explicit = options.shellPath?.trim() || null;
 
-	if (platform !== "win32") return { available: true, path: explicit ?? "bash" };
-
-	if (explicit) {
-		const found = await exists(explicit);
-		if (!found) return rejection(explicit, undefined, false);
-		const version = await validate(explicit);
-		return isGitBashVersion(version) ? { available: true, path: explicit } : rejection(explicit, version, true);
-	}
+	if (platform !== "win32") return { available: true, ...(explicit ? { path: explicit } : {}) };
 
 	let rejected: ShellAvailability | undefined;
 	const check = async (candidate: string): Promise<ShellAvailability | undefined> => {
@@ -107,6 +100,8 @@ export async function probeShell(options: ShellProbeOptions = {}): Promise<Shell
 		rejected ??= rejection(candidate, version, true);
 		return undefined;
 	};
+
+	if (explicit) return (await check(explicit)) ?? rejected ?? rejection(explicit, undefined, false);
 
 	const localAppData = env.LOCALAPPDATA?.trim();
 	const fixed = [DEFAULT_GIT_BASH_PATH];
@@ -125,7 +120,7 @@ export async function probeShell(options: ShellProbeOptions = {}): Promise<Shell
 
 /** The single line shown by `/memory status` and the one-time TUI notice. */
 export function shellStatusLine(shell: ShellAvailability): string {
-	if (shell.available) return `Git Bash: ${shell.path}`;
+	if (shell.available) return shell.path ? `Git Bash: ${shell.path}` : "Shell: Pi default";
 	if (shell.reason === "not-found") return "Git Bash: not found — bash tool disabled";
 	if (shell.detail === "wsl") return `Git Bash: rejected (${shell.path} is WSL)`;
 	if (shell.detail === "missing") return `Git Bash: rejected (${shell.path} was not found)`;

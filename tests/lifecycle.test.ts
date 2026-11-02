@@ -400,6 +400,7 @@ test("manual extraction reports task progress and completion even without change
 });
 
 test("missing Git Bash disables bash, notifies once, and reports the exact status line", async (t) => {
+	if (process.platform !== "win32") return t.skip("Git Bash availability is only probed on Windows");
 	const missing = join(tmpdir(), `pi-memory-missing-bash-${process.pid}-${Date.now()}.exe`);
 	const harness = await createLifecycleHarness(t, {
 		config: {
@@ -409,18 +410,43 @@ test("missing Git Bash disables bash, notifies once, and reports the exact statu
 		},
 	});
 	harness.context.mode = "tui";
+	const topic = join(harness.paths.memoryDir, "fact.md");
 	const toolSets: string[][] = [];
-	const createResponse = (context: Context) => {
+	const checkTools = (context: Context) => {
 		toolSets.push((context.tools ?? []).map((tool) => tool.name).sort());
 		assert.match(context.systemPrompt ?? "", /Shell access is unavailable in this run/);
 		assert.doesNotMatch(context.systemPrompt ?? "", /read-only bash/);
-		return fauxAssistantMessage("Nothing to save.");
 	};
-	harness.faux.setResponses([createResponse, createResponse]);
+	harness.faux.setResponses([
+		(context) => {
+			checkTools(context);
+			return fauxAssistantMessage(fauxToolCall("write", { path: topic, content: "extracted fact\n" }));
+		},
+		() => fauxAssistantMessage("done"),
+	]);
 	await harness.extension.commands.get("memory")?.handler("extract", harness.context);
+	assert.equal(await readFile(topic, "utf8"), "extracted fact\n");
+	harness.faux.setResponses([
+		(context) => {
+			checkTools(context);
+			return fauxAssistantMessage(fauxToolCall("read", { path: topic }));
+		},
+		() =>
+			fauxAssistantMessage(
+				fauxToolCall("edit", {
+					path: topic,
+					edits: [{ oldText: "extracted", newText: "consolidated" }],
+				}),
+			),
+		() => fauxAssistantMessage("done"),
+	]);
 	await harness.extension.commands.get("memory")?.handler("dream", harness.context);
+	assert.equal(await readFile(topic, "utf8"), "consolidated fact\n");
 
-	assert.deepEqual(toolSets[0], ["edit", "find", "grep", "read", "write"]);
+	assert.deepEqual(
+		toolSets,
+		Array.from({ length: 2 }, () => ["edit", "find", "grep", "read", "write"]),
+	);
 	const expected = `Git Bash: rejected (${missing} was not found)`;
 	assert.deepEqual(
 		harness.notices.filter((notice) => notice.message.startsWith("Git Bash:")).map((notice) => notice.message),

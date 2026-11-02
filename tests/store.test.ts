@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { chmod, link, mkdir, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import fs, { chmod, link, mkdir, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -22,12 +24,14 @@ import {
 	readRegularFileNoFollow,
 	readState,
 	recallTopic,
+	safeDeleteMemoryFile,
 	scanTopics,
 	snapshotMarkdown,
+	snapshotMarkdownFile,
 	topicCatalog,
 	truncateIndex,
 } from "../src/store.ts";
-import { createTempDirectory, skipOnWindows } from "./helpers.ts";
+import { createTempDirectory, removeTempDirectory, skipOnWindows } from "./helpers.ts";
 
 test("memory tool paths follow native tilde, prefix, URL, and space normalization", () => {
 	const memoryDir = join(homedir(), ".pi", "memory");
@@ -43,6 +47,20 @@ test("memory tool paths follow native tilde, prefix, URL, and space normalizatio
 	}
 	assert.equal(memoryPathFromToolInput(memoryDir, "/other", { file_path: "~/.pi/memory/topic name.md" }), target);
 	assert.equal(memoryPathFromToolInput(memoryDir, "/other", { path: "~/.pi/memory/../outside.md" }), null);
+});
+
+test("memory tool paths recognize aliases for existing and newly created files", async (t) => {
+	const root = await createTempDirectory(t, "pi-memory-tool-alias-");
+	const memory = join(root, "memory");
+	const alias = join(root, "alias");
+	await mkdir(memory);
+	await symlink(memory, alias, process.platform === "win32" ? "junction" : "dir");
+	await writeFile(join(memory, "existing.md"), "fact");
+	const canonical = await fs.realpath(memory);
+	for (const name of ["existing.md", "new.md", "new-directory/new.md"]) {
+		assert.equal(memoryPathFromToolInput(canonical, root, { path: join(alias, name) }), join(canonical, name));
+	}
+	assert.equal(memoryPathFromToolInput(canonical, root, { path: join(alias, "..", "outside.md") }), null);
 });
 
 test("truncateIndex matches Claude's line and UTF-16 code-unit window", () => {
@@ -283,6 +301,28 @@ test("readIndex omits a non-file index while direct reads still fail", async (t)
 	assert.ok((await stat(index)).isDirectory());
 });
 
+test("storage reads reject terminal symlinks without blocking canonical files", async (t) => {
+	const root = await createTempDirectory(t, "pi-memory-no-follow-");
+	const target = join(root, "target.json");
+	const alias = join(root, "alias.md");
+	await writeFile(target, '{"schemaVersion":1,"lastDreamAt":123}');
+	await symlink(target, alias);
+	assert.equal(await readRegularFileNoFollow(target), '{"schemaVersion":1,"lastDreamAt":123}');
+	await assert.rejects(readRegularFileNoFollow(alias));
+	await assert.rejects(baseline(alias));
+	assert.equal(await snapshotMarkdownFile(root, "alias.md"), undefined);
+	await assert.rejects(
+		readState({
+			projectRoot: root,
+			projectKey: "test",
+			baseDir: root,
+			memoryDir: root,
+			stateFile: alias,
+			locksDir: join(root, "locks"),
+		}),
+	);
+});
+
 test("readIndex follows local private memory symlinks", async (t) => {
 	const root = await createTempDirectory(t, "pi-memory-index-");
 	const outside = join(root, "outside.md");
@@ -294,13 +334,12 @@ test("readIndex follows local private memory symlinks", async (t) => {
 });
 
 test("atomic replacement of a hard-linked entry leaves the other name unchanged", async (t) => {
-	if (skipOnWindows(t, "Windows reports 0o666 for every writable file, so 0600 mode assertions are POSIX-only")) return;
 	const root = await createTempDirectory(t, "pi-memory-atomic-");
 	const filePath = join(root, "fact.md");
 	await chmod(root, 0o700);
 	await atomicWrite(filePath, "durable\n");
 	const info = await stat(filePath);
-	assert.equal(info.mode & 0o777, 0o600);
+	if (process.platform !== "win32") assert.equal(info.mode & 0o777, 0o600);
 	assert.equal(await readFile(filePath, "utf8"), "durable\n");
 	const alias = join(root, "alias.md");
 	try {
@@ -317,7 +356,6 @@ test("atomic replacement of a hard-linked entry leaves the other name unchanged"
 });
 
 test("new memory files publish exclusively with private permissions and no staging files", async (t) => {
-	if (skipOnWindows(t, "Windows reports 0o666 for every writable file, so 0600 mode assertions are POSIX-only")) return;
 	const root = await createTempDirectory(t, "pi-memory-exclusive-create-");
 	const filePath = join(root, "fact.md");
 	const results = await Promise.allSettled([
@@ -328,7 +366,7 @@ test("new memory files publish exclusively with private permissions and no stagi
 	assert.equal(results.filter((result) => result.status === "rejected").length, 1);
 	const content = await readFile(filePath, "utf8");
 	assert.ok(content === "first\n" || content === "second\n");
-	assert.equal((await stat(filePath)).mode & 0o777, 0o600);
+	if (process.platform !== "win32") assert.equal((await stat(filePath)).mode & 0o777, 0o600);
 	assert.deepEqual(await readdir(root), ["fact.md"]);
 	await assert.rejects(
 		atomicWriteIfBaseline(filePath, null, () => "overwrite\n"),
@@ -337,6 +375,172 @@ test("new memory files publish exclusively with private permissions and no stagi
 	assert.equal(await readFile(filePath, "utf8"), content);
 	await atomicWriteIfBaseline(filePath, await baseline(filePath), () => "updated\n");
 	assert.equal(await readFile(filePath, "utf8"), "updated\n");
+});
+
+test("Windows file sharing prevents replacement and deletion until the handle closes", async (t) => {
+	if (process.platform !== "win32") return t.skip("Requires native Windows file sharing");
+	for (const operation of ["replace", "delete"] as const) {
+		await t.test(operation, { timeout: 20_000 }, async (t) => {
+			const root = await fs.mkdtemp(join(tmpdir(), "pi-memory-sharing-"));
+			const file = join(await fs.realpath(root), "fact.md");
+			await writeFile(file, "original");
+			const expected = await baseline(file);
+			const child = spawn(
+				"powershell.exe",
+				[
+					"-NoProfile",
+					"-NonInteractive",
+					"-Command",
+					`
+				$ErrorActionPreference = 'Stop'
+				$handle = [IO.File]::Open($env:PI_MEMORY_LOCK_FILE, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+				try {
+					[Console]::WriteLine('locked')
+					[Console]::Out.Flush()
+					[Console]::ReadLine() | Out-Null
+				} finally { $handle.Dispose() }
+			`,
+				],
+				{ env: { ...process.env, PI_MEMORY_LOCK_FILE: file }, windowsHide: true, timeout: 15_000 },
+			);
+			t.after(async () => {
+				if (child.exitCode === null && child.signalCode === null) {
+					const closed = once(child, "close");
+					child.kill();
+					await closed;
+				}
+				await removeTempDirectory(root);
+			});
+			let stderr = "";
+			child.stderr.on("data", (chunk) => {
+				stderr += chunk;
+			});
+			const ready = await new Promise<string>((resolve, reject) => {
+				child.once("error", reject);
+				child.stdout.once("data", (chunk) => resolve(String(chunk).trim()));
+				child.once("exit", (code) => reject(new Error(`File holder exited (${code}): ${stderr}`)));
+			});
+			assert.equal(ready, "locked");
+			const mutate = () =>
+				operation === "replace"
+					? atomicWriteIfBaseline(file, expected, () => "replacement")
+					: safeDeleteMemoryFile(root, file, expected);
+			await assert.rejects(mutate(), (error) =>
+				["EBUSY", "EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? ""),
+			);
+			assert.equal(await readFile(file, "utf8"), "original");
+			assert.deepEqual(await readdir(root), ["fact.md"]);
+			const exited = once(child, "exit");
+			child.stdin.end("\n");
+			assert.deepEqual(await exited, [0, null]);
+			await mutate();
+			if (operation === "replace") assert.equal(await readFile(file, "utf8"), "replacement");
+			else await assert.rejects(readFile(file), { code: "ENOENT" });
+		});
+	}
+});
+
+test("Windows read-only replacement fails safely, while native rm can clear the attribute", async (t) => {
+	if (process.platform !== "win32") return t.skip("Requires the Windows read-only attribute");
+	const root = await createTempDirectory(t, "pi-memory-readonly-");
+	const file = join(await fs.realpath(root), "fact.md");
+	await writeFile(file, "original");
+	try {
+		await chmod(file, 0o444);
+		await assert.rejects(
+			atomicWriteIfBaseline(file, await baseline(file), () => "replacement"),
+			(error) => ["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? ""),
+		);
+		assert.equal(await readFile(file, "utf8"), "original");
+		assert.deepEqual(await readdir(root), ["fact.md"]);
+		await chmod(file, 0o666);
+		await atomicWriteIfBaseline(file, await baseline(file), () => "replacement");
+		assert.equal(await readFile(file, "utf8"), "replacement");
+	} finally {
+		await chmod(file, 0o666);
+	}
+	await chmod(file, 0o444);
+	await safeDeleteMemoryFile(root, file, undefined);
+	assert.deepEqual(await readdir(root), []);
+});
+
+test("storage retries transient sharing violations and preserves files on permanent errors", async (t) => {
+	for (const operation of ["rename", "link", "rm"] as const) {
+		for (const failure of ["transient", "persistent", "fatal"] as const) {
+			await t.test(`${operation} ${failure}`, async (t) => {
+				if (operation === "link" && process.platform === "android") return t.skip("Android uses exclusive copy");
+				const root = await createTempDirectory(t, "pi-memory-retry-");
+				const file = join(await fs.realpath(root), "fact.md");
+				if (operation !== "link") await writeFile(file, "original");
+				const expected = operation === "link" ? null : await baseline(file);
+				const original = fs[operation];
+				let attempts = 0;
+				const code = failure === "fatal" ? "ENOTSUP" : { rename: "EPERM", link: "EACCES", rm: "EBUSY" }[operation];
+				t.mock.method(fs, operation, async (...args: Parameters<typeof original>) => {
+					// Do not interfere with staging-file cleanup.
+					if ((operation === "rm" ? args[0] : args[1]) === file) {
+						attempts++;
+						if (failure !== "transient" || attempts <= 2)
+							throw Object.assign(new Error("injected filesystem error"), { code });
+					}
+					return (original as (...args: unknown[]) => Promise<void>)(...args);
+				});
+				syncBuiltinESMExports();
+				t.after(() => {
+					t.mock.restoreAll();
+					syncBuiltinESMExports();
+				});
+				const result =
+					operation === "rm"
+						? safeDeleteMemoryFile(root, file, undefined)
+						: atomicWriteIfBaseline(file, expected, () => "replacement");
+				if (failure === "transient") await result;
+				else await assert.rejects(result, { code });
+				assert.equal(attempts, failure === "transient" ? 3 : failure === "persistent" ? 5 : 1);
+				const absent = operation === "rm" ? failure === "transient" : operation === "link" && failure !== "transient";
+				if (absent) await assert.rejects(readFile(file), { code: "ENOENT" });
+				else assert.equal(await readFile(file, "utf8"), failure === "transient" ? "replacement" : "original");
+				assert.deepEqual(await readdir(root), absent ? [] : ["fact.md"]);
+			});
+		}
+	}
+});
+
+test("sharing-violation retries stop after mutation permission is revoked", async (t) => {
+	for (const operation of ["rename", "link", "rm"] as const) {
+		await t.test(operation, async (t) => {
+			if (operation === "link" && process.platform === "android") return t.skip("Android uses exclusive copy");
+			const root = await createTempDirectory(t, "pi-memory-retry-guard-");
+			const filePath = join(await fs.realpath(root), "fact.md");
+			if (operation !== "link") await writeFile(filePath, "original");
+			const expected = operation === "link" ? null : await baseline(filePath);
+			let allowed = true;
+			const original = fs[operation];
+			t.mock.method(fs, operation, async (...args: Parameters<typeof original>) => {
+				if (allowed) {
+					allowed = false;
+					throw Object.assign(new Error("sharing violation"), { code: "EBUSY" });
+				}
+				return (original as (...args: unknown[]) => Promise<void>)(...args);
+			});
+			syncBuiltinESMExports();
+			t.after(() => {
+				t.mock.restoreAll();
+				syncBuiltinESMExports();
+			});
+			const guard = () => {
+				if (!allowed) throw new Error("mutation permission revoked");
+			};
+			await assert.rejects(
+				operation === "rm"
+					? safeDeleteMemoryFile(root, filePath, undefined, undefined, guard)
+					: atomicWriteIfBaseline(filePath, expected, () => "replacement", undefined, guard),
+				/mutation permission revoked/,
+			);
+			if (operation === "link") await assert.rejects(readFile(filePath), { code: "ENOENT" });
+			else assert.equal(await readFile(filePath, "utf8"), "original");
+		});
+	}
 });
 
 test("atomicWriteIfBaseline rejects a changed file instead of losing the update", async (t) => {

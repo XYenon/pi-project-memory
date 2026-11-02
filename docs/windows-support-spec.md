@@ -26,8 +26,8 @@ Scope: make `pi-project-memory` fully usable on native Windows 10/11 (x64 and ar
   - `pi install git:...` and `pi install .` (local clone) are supported today. The git path clones and runs `npm install` inside the clone, so the root `os` field does not block it; the local path only records the path.
   - `pi install npm:pi-project-memory` becomes supported once a release carrying `win32` exists. Before that, npm-from-fork is not supported and the docs say so.
 - Native binding:
-  - `tree-sitter` and `tree-sitter-bash` are static imports (`src/bash-readonly.ts:1-2`).
-  - A startup preflight converts `MODULE_NOT_FOUND` / `ERR_DLOPEN_FAILED` into an actionable error naming `win32-<arch>` and the supported Node lines, then fails extension load.
+  - `src/bash-readonly.ts` loads `tree-sitter` and `tree-sitter-bash` when the module initializes.
+  - A missing or incompatible binding fails extension load with the dependency's error. No custom loader, separate preflight, or lazy parser is needed.
   - No degradation: a broken native binding is a broken install, unlike a missing Git Bash.
 - Live `pi install` and extension-load smoke stay out of CI; they are part of the manual checklist.
 - Release gate: user-facing "supported on Windows" claims (README matrix, npm description) may only ship once the required `windows-latest` job is green on `master`. Implementation workstreams may merge earlier without the claim.
@@ -149,29 +149,28 @@ One helper and one containment predicate are used by `resolveToolPath`, `configu
 
 ### Read-only targets
 
-- A read-only attribute is treated as stale: clear it (mode `0o666`), retry, and report the cleared attribute in the tool result.
-- Documented: memory files are machine-managed; a user-set read-only flag is not honored.
+- Replacement does not clear a read-only attribute. After bounded retries fail, the original content remains intact. Clear the attribute before retrying the update.
+- Deletion uses Node's `fs.rm`, whose Windows implementation can clear the read-only attribute. No separate extension-level recovery or attribute notice is added.
 
 ### Hard-link publish
 
 - No `copyFile` fallback. `link` + `EEXIST` stays the exclusive-create primitive.
-- `EPERM`/`ENOSYS`/`ENOTSUP`/`EXDEV` fail with the errno, filesystem, and path, pointing at the root policy.
+- Other link failures preserve Node's original error, including its errno and paths. Sharing violations receive the same bounded retries as replacement and deletion.
 
 ### Reparse points and no-follow
 
-- A memory root that is itself a junction or symlink is rejected at startup.
+- On Windows, a memory root that is itself a junction or symlink is rejected at startup. POSIX keeps accepting symlink memory roots.
 - Scanning uses `followSymbolicLinks: false` and skips reparse entries, so scan and snapshot agree.
 - Direct read/write/edit/delete refuses any path with a reparse point in its ancestry, verified per file.
-- `O_NOFOLLOW` is replaced by `lstat` → reject reparse → open → `realpath` containment.
-- Documented limitation: check-then-open leaves a residual TOCTOU window that `O_NOFOLLOW` would close.
+- POSIX storage reads retain `O_NOFOLLOW`. Windows storage reads check absolute ancestors with `lstat` before opening the file.
+- Documented limitation: the Windows check before open leaves a residual TOCTOU window that `O_NOFOLLOW` closes on POSIX for the final entry.
 
 ### Locks
 
-- Payload records `pid`, process start-time token, and hostname.
-- Creation uses `wx` and is fsync'd. Heartbeat uses `utimes` at `staleMs / 3`, bounded to 100–1000 ms.
-- Staleness: `pid: 0` is dead; a start-token or hostname mismatch is dead; otherwise the mtime heartbeat decides.
-- An absolute maximum lease age guarantees reclamation.
-- `process.kill(pid, 0)` is a secondary signal only.
+- Payload records `pid`, a random ownership token, and acquisition time. Unused process-start and hostname fields are omitted.
+- Creation uses `wx`. Heartbeat uses `utimes` at `staleMs / 3`, bounded to 100–1000 ms.
+- A stale heartbeat permits recovery only when the owner is not alive. `pid: 0` is dead; live owners remain protected by `process.kill(pid, 0)`.
+- Recovery rechecks the heartbeat and ownership token before replacing a stale lock. PID reuse remains a limitation; writing an unused start token would not solve it.
 
 ### Permissions
 
@@ -183,7 +182,7 @@ One helper and one containment predicate are used by `resolveToolPath`, `configu
 
 ### Matrix
 
-- One `windows-latest` job at Node 22, required, `fail-fast: false`. Existing `ubuntu-latest`/`macos-latest` × 22/24/26 unchanged.
+- Shared matrix: `ubuntu-latest`/`macos-latest`/`windows-latest` × Node 22/24/26, required, `fail-fast: false`.
 - No arm64 runner.
 
 ### Prerequisites
@@ -191,10 +190,12 @@ One helper and one containment predicate are used by `resolveToolPath`, `configu
 - `.gitattributes` with `* text=auto eol=lf`, index renormalized once. No CRLF normalization inside tests.
 - Install `ripgrep` and `fd` on the Windows runner.
 - Assert the resolved `bash` reports `MINGW*`/`MSYS*`; fail the job otherwise.
+- The child-tool test also requires the extension's own shell probe and Bash execution to succeed in CI. Missing Git Bash must not silently skip that test.
 
 ### Skips
 
 - POSIX-only tests skip through one `skipOnWindows(reason)` helper keyed on `process.platform`, with the reason emitted.
+- Shared storage behavior still runs on Windows. Only POSIX permission assertions are omitted from the hard-link replacement and exclusive-create tests.
 - The same list is reproduced in the user docs.
 - `ulimit` and `xargs` blocks are gated the same way.
 - No `if (win32) return` early exits.
@@ -207,7 +208,9 @@ One helper and one containment predicate are used by `resolveToolPath`, `configu
 ### New tests
 
 - Cross-platform unit tests for pure path rules: forms, drive-relative rejection, ADS rejection, case-insensitive containment, `.MD`, budget arithmetic.
-- `tests/windows.test.ts` (win32 only) for: Git Bash vs WSL detection, `shellPath` honoring and rejection, no-bash tool list and prompt variant, `rm` operand forms, reparse refusal, spawn-`cwd` budget, read-only recovery, retry, stale-lock takeover.
+- Existing test files cover shell detection, path rules, storage, and lifecycle behavior. Windows-only integration cases exercise native path forms through read/edit/write/delete, file sharing, and read-only attributes.
+- Both shell states exercise memory operations. Without Bash, tests run native search/read/edit/write and extraction/dream maintenance. Codemode tests cover both states in `on` and `only` modes for both background roles.
+- Storage fault injection covers transient recovery, exhausted retries, non-retryable errors, and revoked mutation permission for rename, exclusive link publication, and deletion.
 - The metadata test asserts `os` includes `win32` on every OS.
 
 ## 7. Docs and security claims
@@ -235,9 +238,9 @@ One helper and one containment predicate are used by `resolveToolPath`, `configu
 ## 8. Migration and compatibility
 
 - macOS, Linux, and Termux behavior is unchanged except for the shared normalization helper, which must be a no-op for already-canonical POSIX paths.
-- Namespace adoption: compute the canonical key; if the canonical namespace directory does not exist and the legacy-key directory does, keep using the legacy directory. No directory moves, no halfway migration.
+- Project keys already use the canonical project root, so a project alias reuses its existing namespace. The existing migration from the earlier always-hashed layout stays unchanged.
 - No Windows memory exists before this work, so Windows needs no migration.
-- Existing locks and state files stay compatible; the added lock fields are optional on read and default to "unknown, fall back to heartbeat".
+- Existing locks and state files stay compatible. Older lock payloads with additional fields are accepted, and ownership still uses the random token.
 
 ## 9. Acceptance criteria
 
@@ -265,13 +268,13 @@ One helper and one containment predicate are used by `resolveToolPath`, `configu
 ### Storage
 
 - A publish while another handle holds the file retries and then either succeeds or emits the "open in another process" message.
-- A read-only `MEMORY.md` is replaced and the result reports the cleared attribute.
+- A read-only topic retains its content after a failed replacement, can be updated after its attribute is cleared, and can be deleted through Node's native `fs.rm` handling.
 - A junction inside the memory tree is not scanned and cannot be written through.
 - A stale lock with a recycled PID and an old heartbeat is reclaimed.
 
 ### CI
 
-- One required `windows-latest` Node 22 job is green and stable across repeated runs.
+- All required `windows-latest` jobs at Node 22/24/26 are green and stable across repeated runs.
 - POSIX-only skips appear with reasons and match the documented list.
 
 ### Docs
@@ -307,7 +310,7 @@ Clean Windows 11 x64 VM with no prior Pi state:
 
 One child ticket per workstream, with the matching acceptance criteria copied in:
 
-1. Packaging and install (`os`, preflight, install docs)
+1. Packaging and install (`os`, install docs)
 2. Shell detection and missing-bash degradation
 3. Path normalization, containment, and restricted-bash operands
 4. Storage, retries, reparse points, and locks

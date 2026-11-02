@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import test, { after, before } from "node:test";
@@ -264,7 +264,7 @@ test("normalizePathInput maps every accepted Windows form to one canonical drive
 	for (const [input, expected] of cases)
 		assert.equal(normalizePathInput("D:\\project", input, "win32"), expected, input);
 	for (const input of ["~/pi-windows-path-fixture/a.md", "~\\pi-windows-path-fixture\\a.md"]) {
-		const expected = win32.join(homedir(), "pi-windows-path-fixture", "a.md");
+		const expected = win32.resolve("D:\\project", homedir(), "pi-windows-path-fixture", "a.md");
 		assert.equal(normalizePathInput("D:\\project", input, "win32"), expected, input);
 	}
 	assert.equal(normalizePathInput("D:\\project", "~", "win32"), normalizePathInput("D:\\project", homedir(), "win32"));
@@ -296,14 +296,6 @@ test("isContainedPath case-folds Windows paths and rejects sibling prefixes", ()
 	assert.equal(isContainedPath("C:\\memory", "D:\\memory\\a.md", "win32"), false);
 	assert.equal(isContainedPath("/memory", "/memory/topics/a.md", "linux"), true);
 	assert.equal(isContainedPath("/memory", "/memory-evil/a.md", "linux"), false);
-});
-
-test("the containment primitive stays lexical and case-folds on Windows", () => {
-	assert.equal(isContainedPath("/memory", "/memory/topic.md", "linux"), true);
-	assert.equal(isContainedPath("/memory", "/memory-evil/topic.md", "linux"), false);
-	assert.equal(isContainedPath("C:\\memory", "C:\\memory\\topic.md", "win32"), true);
-	assert.equal(isContainedPath("C:\\memory", "c:\\MEMORY\\topic.md", "win32"), true);
-	assert.equal(isContainedPath("C:\\memory", "C:\\memory-evil\\topic.md", "win32"), false);
 	// The comparison stays lexical; write and delete callers resolve links with
 	// realpath before consulting it, while reads may follow links like Claude.
 	assert.equal(isContainedPath("C:\\memory", "C:\\memory\\link\\secret.md", "win32"), true);
@@ -360,38 +352,18 @@ test("startup enforces the Windows memory path budget on the canonical root", as
 	} else await initializeProjectPaths(paths);
 });
 
-test("an existing legacy namespace is adopted instead of migrated", async (t) => {
-	const root = await createTempDirectory(t, "pi-memory-legacy-namespace-");
-	const agentDir = join(root, "agent");
+test("a project alias reuses its existing canonical namespace and memory", async (t) => {
+	const root = await createTempDirectory(t, "pi-memory-alias-namespace-");
 	const project = join(root, "project");
 	const alias = join(root, "project-alias");
-	await Promise.all([mkdir(project), mkdir(agentDir)]);
+	await mkdir(project);
 	await symlink(project, alias, process.platform === "win32" ? "junction" : "dir");
-	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-	t.after(() => {
-		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-	});
-	const projectRoot = await realpath(project);
-	const canonicalKey = sanitizeProjectKey(projectRoot);
-	const legacyKey = sanitizeProjectKey(alias);
-	assert.notEqual(canonicalKey, legacyKey);
-	const projectsRoot = join(agentDir, "project-memory", "projects");
-	const legacyDir = join(projectsRoot, legacyKey);
-	await mkdir(legacyDir, { recursive: true });
-	await writeFile(join(legacyDir, ".project-root"), `${projectRoot}\n`);
-	const adopted = await resolveProjectPaths(alias);
-	assert.equal(adopted.projectKey, legacyKey);
-	assert.equal(adopted.namespaceDir, legacyDir);
-	await assert.rejects(access(join(projectsRoot, canonicalKey)), { code: "ENOENT" });
-
-	const canonicalDir = join(projectsRoot, canonicalKey);
-	await mkdir(canonicalDir);
-	await writeFile(join(canonicalDir, ".project-root"), `${projectRoot}\n`);
-	const preferred = await resolveProjectPaths(alias);
-	assert.equal(preferred.projectKey, canonicalKey);
-	assert.equal(preferred.namespaceDir, canonicalDir);
+	const original = await resolveProjectPaths(project);
+	await initializeProjectPaths(original);
+	await writeFile(join(original.memoryDir, "fact.md"), "existing memory\n");
+	const linked = await resolveProjectPaths(alias);
+	assert.deepEqual(linked, original);
+	assert.equal(await readFile(join(linked.memoryDir, "fact.md"), "utf8"), "existing memory\n");
 	// Remove the junction before the recursive temp-directory teardown.
 	await rm(alias, { force: true });
 });
@@ -401,6 +373,21 @@ test("the memory root policy rejects UNC and non-fixed drives at startup", async
 		assertLocalFixedMemoryRoot("\\\\server\\share\\memory", "win32"),
 		/memory root is not a local fixed drive/,
 	);
-	await assert.doesNotThrow(() => assertLocalFixedMemoryRoot("C:\\memory", "win32"));
-	await assert.doesNotThrow(() => assertLocalFixedMemoryRoot("/memory", "linux"));
+	await assertLocalFixedMemoryRoot(`${process.env.SystemDrive ?? "C:"}\\memory`, "win32");
+	await assertLocalFixedMemoryRoot("/memory", "linux");
+});
+
+test("the memory root policy rejects a drive when its type cannot be probed", async () => {
+	const previousPath = process.env.PATH;
+	try {
+		process.env.PATH = "";
+		const drive = process.env.SystemDrive?.toUpperCase() === "Z:" ? "Y" : "Z";
+		await assert.rejects(
+			assertLocalFixedMemoryRoot(`${drive}:\\memory`, "win32"),
+			/memory root is not a local fixed drive/,
+		);
+	} finally {
+		if (previousPath === undefined) delete process.env.PATH;
+		else process.env.PATH = previousPath;
+	}
 });

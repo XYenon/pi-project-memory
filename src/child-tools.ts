@@ -154,17 +154,6 @@ async function memoryPathSet(memoryDir: string, baselines: ReadonlyMap<string, R
 		ignore: VCS_METADATA_DIRECTORIES.map((directory) => `**/${directory}/**`),
 	});
 	for (const path of baselines.keys()) paths.push(relative(canonicalRoot, path).split(sep).join("/"));
-	if (process.platform === "win32") {
-		const seen = new Set<string>();
-		return new Set(
-			paths.filter((path) => {
-				const key = resolve(canonicalRoot, path).toLowerCase();
-				if (seen.has(key)) return false;
-				seen.add(key);
-				return true;
-			}),
-		);
-	}
 	return new Set(paths);
 }
 
@@ -398,10 +387,10 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 
 	// `shellCommandPrefix` is intentionally not forwarded: background bash starts
 	// from a clean shell. `shellPath` is the only shell setting honored here.
-	const shellPath = env.shell?.available ? env.shell.path : undefined;
+	const shellPath = env.shell?.path;
 	const nativeBashShape = createBashTool(env.cwd, {
 		exposeSessionEnvironment: false,
-		...(shellPath ? { shellPath } : {}),
+		shellPath,
 	});
 	const bash: typeof nativeBashShape = {
 		...nativeBashShape,
@@ -447,7 +436,7 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 				if (!env.scratchDir) throw new Error("Restricted Bash requires a private scratch directory");
 				const nativeBash = createBashTool(prepared.cwd, {
 					...prepared.options,
-					...(shellPath ? { shellPath } : {}),
+					shellPath,
 				});
 				const result = await nativeBash.execute(
 					id,

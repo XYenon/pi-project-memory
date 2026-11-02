@@ -25,7 +25,6 @@ import {
 	sanitizeRecentMessages,
 	selectRelevantMemories,
 } from "./src/models.ts";
-import { preflightNativeBindings } from "./src/native-binding.ts";
 import {
 	assertContainedMarkdown,
 	displayPath,
@@ -160,9 +159,6 @@ interface RuntimeState {
 }
 
 export default function projectMemoryExtension(pi: ExtensionAPI) {
-	// A missing or ABI-mismatched tree-sitter prebuild is a broken install: fail
-	// extension load with the actionable install error instead of degrading.
-	preflightNativeBindings();
 	let runtime: RuntimeState | undefined;
 	let blockedByTrust = false;
 	const backgroundUsage = processBackgroundUsage();

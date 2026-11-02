@@ -1,8 +1,13 @@
 import { realpath } from "node:fs/promises";
-import { relative, resolve, sep, win32 } from "node:path";
+import { posix, win32 } from "node:path";
 import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
 import { classifyReadOnlyBash, parseStaticBashCommand } from "./bash-readonly.ts";
-import { assertBashCwdBudget, assertContainedMarkdown, normalizePathLexical, VCS_METADATA_DIRECTORIES } from "./paths.ts";
+import {
+	assertBashCwdBudget,
+	assertContainedMarkdown,
+	normalizePathLexical,
+	VCS_METADATA_DIRECTORIES,
+} from "./paths.ts";
 
 export interface RestrictedBashPolicy {
 	memoryDir: string;
@@ -42,11 +47,6 @@ const PROTECTED_MEMORY_DIRECTORIES = new Set([
 
 const WINDOWS_ABSOLUTE_OPERAND = /^(?:[a-zA-Z]:[\\/]|[\\/]|~(?:[\\/]|$))/;
 
-/** Operand forms are absolute on POSIX; Windows also accepts drive and home forms. */
-function isAbsoluteOperand(operand: string, platform: NodeJS.Platform): boolean {
-	return platform === "win32" ? WINDOWS_ABSOLUTE_OPERAND.test(operand) : operand.startsWith("/");
-}
-
 function parseDelete(
 	command: string,
 	memoryDir: string,
@@ -73,20 +73,17 @@ function parseDelete(
 			continue;
 		}
 		if (!operands && raw.startsWith("-")) throw new Error("rm permits only -f or --force");
-		if (!isAbsoluteOperand(raw, platform)) throw new Error("rm requires absolute, non-glob Markdown paths");
+		const absolute = platform === "win32" ? WINDOWS_ABSOLUTE_OPERAND.test(raw) : raw.startsWith("/");
+		if (!absolute) throw new Error("rm requires absolute, non-glob Markdown paths");
 		// Normalize without resolving symlinks so a memory-internal link stays the
 		// link itself. The typed command is never rewritten; `path` is only used for
 		// validation and the delete call.
 		const normalized = normalizePathLexical(memoryDir, raw, platform);
 		if (/[*?[]/.test(normalized)) throw new Error("rm requires absolute, non-glob Markdown paths");
 		const path = assertContainedMarkdown(memoryDir, normalized, platform);
-		const flavor = platform === "win32" ? win32 : undefined;
-		const relativePath = flavor ? flavor.relative(flavor.resolve(memoryDir), path) : relative(resolve(memoryDir), path);
-		if (
-			(flavor ? relativePath.split(/[\\/]+/) : relativePath.split(sep)).some((segment) =>
-				PROTECTED_MEMORY_DIRECTORIES.has(segment.toLowerCase()),
-			)
-		)
+		const flavor = platform === "win32" ? win32 : posix;
+		const relativePath = flavor.relative(flavor.resolve(memoryDir), path);
+		if (relativePath.split(flavor.sep).some((segment) => PROTECTED_MEMORY_DIRECTORIES.has(segment.toLowerCase())))
 			throw new Error("rm cannot delete from a protected memory subdirectory");
 		paths.push(path);
 	}

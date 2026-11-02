@@ -21,11 +21,8 @@ export const WINDOWS_FILE_PATH_BUDGET = 258;
 /** `child_process.spawn` fails with ENOENT at 259 characters of `cwd`. */
 export const WINDOWS_BASH_CWD_BUDGET = 258;
 
-const ASCII_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 const WINDOWS_DRIVE = /^[a-zA-Z]:/;
 const WINDOWS_ABSOLUTE_DRIVE = /^[a-zA-Z]:[\\/]/;
-const WINDOWS_MSYS_PREFIX = /^\/(?:cygdrive\/)?([a-zA-Z])(?=\/|$)/;
-const WINDOWS_WSL_PREFIX = /^\/mnt\/([a-zA-Z])(?=\/|$)/;
 const WINDOWS_VARIABLE = /%[^%\\/]+%/;
 
 function stripExtendedPrefix(path: string): string {
@@ -35,61 +32,22 @@ function stripExtendedPrefix(path: string): string {
 	return path;
 }
 
-function expandHome(input: string, windows: boolean): string {
-	if (input === "~") return homedir();
-	if (windows ? /^~[\\/]/.test(input) : input.startsWith("~/")) {
-		const flavor = windows ? win32 : posix;
-		return flavor.join(homedir(), input.slice(2));
-	}
-	return input;
-}
-
-function expandWindowsMount(path: string): string {
-	for (const pattern of [WINDOWS_WSL_PREFIX, WINDOWS_MSYS_PREFIX]) {
-		const match = pattern.exec(path);
-		if (!match) continue;
-		const letter = match[1];
-		if (letter) return `${letter.toUpperCase()}:\\${path.slice(match[0].length)}`;
-	}
-	return path;
-}
-
-/** Resolve on-disk casing through `realpath`, falling back to the nearest existing ancestor. */
-function canonicalWindowsPath(path: string): string {
-	const resolved = win32.resolve(path);
+/** Resolve aliases and on-disk casing, including paths whose final components do not exist yet. */
+export function canonicalPath(path: string, platform: NodeJS.Platform = process.platform): string {
+	const flavor = platform === "win32" ? win32 : posix;
+	const resolved = flavor.resolve(path);
 	let current = resolved;
 	const suffix: string[] = [];
 	for (;;) {
 		try {
 			const canonical = stripExtendedPrefix(realpathSync.native(current));
-			return suffix.length === 0 ? canonical : win32.join(canonical, ...suffix);
+			return flavor.join(canonical, ...suffix);
 		} catch {}
-		const parent = win32.dirname(current);
+		const parent = flavor.dirname(current);
 		if (parent === current) return resolved;
-		suffix.unshift(win32.basename(current));
+		suffix.unshift(flavor.basename(current));
 		current = parent;
 	}
-}
-
-function normalizeWindowsPathInput(base: string, input: string): string {
-	let path = input.replace(ASCII_SPACES, " ").replace(/^@/, "").trim();
-	if (path.startsWith("file://")) path = fileURLToPath(path);
-	if (WINDOWS_VARIABLE.test(path)) throw new Error(`Environment variable expansion is not supported: ${input}`);
-	path = expandHome(path, true);
-	path = stripExtendedPrefix(path);
-	path = expandWindowsMount(path);
-	if (WINDOWS_DRIVE.test(path) && !WINDOWS_ABSOLUTE_DRIVE.test(path))
-		throw new Error(`Drive-relative paths are not supported: ${input}`);
-	const resolved = win32.resolve(base, path);
-	if (resolved.slice(2).includes(":")) throw new Error(`Alternate data streams are not supported: ${input}`);
-	return canonicalWindowsPath(resolved);
-}
-
-function normalizePosixPathInput(base: string, input: string): string {
-	let path = input.replace(ASCII_SPACES, " ").replace(/^@/, "");
-	if (path.startsWith("file://")) path = fileURLToPath(path);
-	else path = expandHome(path, false);
-	return posix.resolve(base, path);
 }
 
 /**
@@ -99,7 +57,8 @@ function normalizePosixPathInput(base: string, input: string): string {
  * canonical paths.
  */
 export function normalizePathInput(base: string, input: string, platform: NodeJS.Platform = process.platform): string {
-	return platform === "win32" ? normalizeWindowsPathInput(base, input) : normalizePosixPathInput(base, input);
+	const lexical = normalizePathLexical(base, input, platform);
+	return platform === "win32" ? canonicalPath(lexical, platform) : lexical;
 }
 
 /**
@@ -112,25 +71,25 @@ export function normalizePathLexical(
 	input: string,
 	platform: NodeJS.Platform = process.platform,
 ): string {
-	return platform === "win32" ? normalizeWindowsBashPathInput(base, input) : normalizePosixPathInput(base, input);
-}
-
-function normalizeWindowsBashPathInput(base: string, input: string): string {
-	let path = input.replace(ASCII_SPACES, " ").replace(/^@/, "").trim();
+	const windows = platform === "win32";
+	const flavor = windows ? win32 : posix;
+	let path = input.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
+	if (windows) path = path.trim();
 	if (path.startsWith("file://")) path = fileURLToPath(path);
-	path = expandHome(path, true);
-	path = stripExtendedPrefix(path);
-	path = expandWindowsMount(path);
+	if (windows && WINDOWS_VARIABLE.test(path))
+		throw new Error(`Environment variable expansion is not supported: ${input}`);
+	if (path === "~") path = homedir();
+	else if (windows ? /^~[\\/]/.test(path) : path.startsWith("~/")) path = flavor.join(homedir(), path.slice(2));
+	if (!windows) return flavor.resolve(base, path);
+	path = stripExtendedPrefix(path).replace(
+		/^\/(?:(?:mnt|cygdrive)\/)?([a-zA-Z])(?=\/|$)/,
+		(_match, drive: string) => `${drive.toUpperCase()}:\\`,
+	);
 	if (WINDOWS_DRIVE.test(path) && !WINDOWS_ABSOLUTE_DRIVE.test(path))
 		throw new Error(`Drive-relative paths are not supported: ${input}`);
-	// Resolve relative to base but without resolving symlinks
-	const resolved = win32.resolve(base, path);
-	// `\\?\` extended paths carry a colon past the drive; `canonicalWindowsPath`
-	// with a non-existent path falls back to `win32.resolve`, so just strip the
-	// prefix instead before the ADS check.
-	const stripped = stripExtendedPrefix(resolved);
-	if (stripped.slice(2).includes(":")) throw new Error(`Alternate data streams are not supported: ${input}`);
-	return stripped;
+	const resolved = stripExtendedPrefix(flavor.resolve(base, path));
+	if (resolved.slice(2).includes(":")) throw new Error(`Alternate data streams are not supported: ${input}`);
+	return resolved;
 }
 
 /** Match Pi native tool path normalization on the supported platforms. */
@@ -143,42 +102,30 @@ export function isMarkdownPath(path: string, platform: NodeJS.Platform = process
 	return platform === "win32" ? /\.md$/i.test(path) : path.endsWith(".md");
 }
 
-/** Windows reports symlinks and junctions through the reparse attribute. */
-export function isReparsePoint(info: { isSymbolicLink(): boolean }): boolean {
-	return info.isSymbolicLink();
-}
-
 /**
  * Walk every ancestor of a file path and reject when one is a reparse point.
  * This closes the `realpath` gap where a junction chains to an escaped root.
  */
 export async function rejectReparsePathAncestor(filePath: string): Promise<void> {
-	const segments = filePath.split(sep);
-	let current = "";
-	for (const segment of segments) {
-		if (!segment) continue;
-		current = current ? `${current}${sep}${segment}` : segment;
-		if (segment === "" || /^[a-zA-Z]:$/.test(segment)) continue;
-		const segmentPath = current;
-		let info: import("node:fs").Stats;
-		try {
-			info = await lstat(segmentPath);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+	if (process.platform !== "win32") return;
+	for (let current = resolve(filePath); ; current = dirname(current)) {
+		const info = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+			if (error.code === "ENOENT") return undefined;
 			throw error;
-		}
-		if (isReparsePoint(info))
-			throw new Error(`Memory path traverses a symlink or junction: ${current}`);
+		});
+		if (info?.isSymbolicLink()) throw new Error(`Memory path traverses a symlink or junction: ${current}`);
+		if (dirname(current) === current) return;
 	}
 }
 
 /** Reject memory roots that are themselves junctions or symlinks. */
 export async function rejectReparseRoot(path: string): Promise<void> {
+	if (process.platform !== "win32") return;
 	const info = await lstat(path).catch((error: NodeJS.ErrnoException) => {
 		if (error.code === "ENOENT") return undefined;
 		throw error;
 	});
-	if (info && isReparsePoint(info)) throw new Error(`Memory root must not be a symlink or junction: ${path}`);
+	if (info?.isSymbolicLink()) throw new Error(`Memory root must not be a symlink or junction: ${path}`);
 }
 
 export function containsVcsMetadataSegment(path: string): boolean {
@@ -250,7 +197,7 @@ function configuredMemoryDirectory(value: string | null): string | null {
 		)
 			return null;
 		expanded = join(homedir(), tail);
-	} else if (!(process.platform === "win32" ? win32.isAbsolute(value) : isAbsolute(value))) {
+	} else if (!isAbsolute(value)) {
 		return null;
 	}
 	let normalized: string;
@@ -330,8 +277,7 @@ async function canonicalNamespacePath(path: string): Promise<string> {
 	const missing: string[] = [];
 	for (;;) {
 		try {
-			const canonical = stripExtendedPrefix(await realpath(current));
-			return (missing.length === 0 ? canonical : join(canonical, ...missing.reverse())).normalize("NFC");
+			return join(stripExtendedPrefix(await realpath(current)), ...missing.reverse()).normalize("NFC");
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return normalizePathInput(current, path).normalize("NFC");
 		}
@@ -342,40 +288,14 @@ async function canonicalNamespacePath(path: string): Promise<string> {
 	}
 }
 
-/**
- * Reuse an existing legacy namespace instead of moving directories. The canonical
- * key wins when its directory already exists; otherwise a legacy-key directory
- * reserved for the same project root keeps serving that project.
- */
-async function adoptExistingNamespace(
-	projectsRoot: string,
-	canonicalKey: string,
-	legacyKey: string,
-	projectRoot: string,
-): Promise<string> {
-	if (legacyKey === canonicalKey) return canonicalKey;
-	const canonicalExists = await access(join(projectsRoot, canonicalKey)).then(
-		() => true,
-		() => false,
-	);
-	if (canonicalExists) return canonicalKey;
-	return (await readProjectMarker(join(projectsRoot, legacyKey))) === projectRoot ? legacyKey : canonicalKey;
-}
-
 export async function resolveProjectPaths(
 	cwd: string,
 	autoMemoryDirectory: string | null = null,
 ): Promise<ProjectPaths> {
 	const projectRoot = await canonicalProjectRoot(cwd);
-	const canonicalKey = sanitizeProjectKey(projectRoot);
+	const projectKey = sanitizeProjectKey(projectRoot);
 	const agentMemoryRoot = join(getAgentDir(), "project-memory");
 	const projectsRoot = join(agentMemoryRoot, "projects");
-	const projectKey = await adoptExistingNamespace(
-		projectsRoot,
-		canonicalKey,
-		sanitizeProjectKey(resolve(cwd)),
-		projectRoot,
-	);
 	const compatibleBaseDir = join(projectsRoot, projectKey);
 	const preHashBaseDir = join(projectsRoot, `${projectKey}-${namespaceHash(projectRoot)}`);
 	// Migrate the short-lived always-hashed layout before reserving the ordinary
@@ -454,12 +374,6 @@ export function displayPath(path: string): string {
 	return path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
 }
 
-function containsWin32Path(root: string, candidate: string): boolean {
-	const foldedRoot = win32.resolve(root).toLowerCase().replace(/\\+$/, "");
-	const foldedCandidate = win32.resolve(candidate).toLowerCase().replace(/\\+$/, "");
-	return foldedCandidate === foldedRoot || foldedCandidate.startsWith(`${foldedRoot}\\`);
-}
-
 /**
  * The single containment primitive. Windows compares case-folded `path.win32`
  * forms so drive casing, separators, and junctions name the same root. The
@@ -472,7 +386,11 @@ export function isContainedPath(
 	candidate: string,
 	platform: NodeJS.Platform = process.platform,
 ): boolean {
-	if (platform === "win32") return containsWin32Path(root, candidate);
+	if (platform === "win32") {
+		const foldedRoot = win32.resolve(root).toLowerCase().replace(/\\+$/, "");
+		const foldedCandidate = win32.resolve(candidate).toLowerCase().replace(/\\+$/, "");
+		return foldedCandidate === foldedRoot || foldedCandidate.startsWith(`${foldedRoot}\\`);
+	}
 	const normalizedRoot = posix.resolve(root);
 	const normalized = posix.resolve(candidate);
 	return normalized === normalizedRoot || normalized.startsWith(`${normalizedRoot}${posix.sep}`);
@@ -516,7 +434,7 @@ export function assertBashCwdBudget(cwd: string, platform: NodeJS.Platform = pro
 
 const DRIVE_TYPE_CACHE = new Map<string, boolean>();
 
-async function driveIsLocalFixed(letter: string): Promise<boolean | undefined> {
+async function driveIsLocalFixed(letter: string): Promise<boolean> {
 	const cached = DRIVE_TYPE_CACHE.get(letter);
 	if (cached !== undefined) return cached;
 	const systemDrive = (process.env.SystemDrive ?? "C:").slice(0, 1).toLowerCase();
@@ -540,9 +458,7 @@ async function driveIsLocalFixed(letter: string): Promise<boolean | undefined> {
 		DRIVE_TYPE_CACHE.set(letter, fixed);
 		return fixed;
 	} catch {
-		// Treat an unavailable probe as unknown capability rather than rejecting a
-		// root that only the lexical checks can classify.
-		return undefined;
+		return false;
 	}
 }
 
@@ -553,6 +469,5 @@ export async function assertLocalFixedMemoryRoot(
 ): Promise<void> {
 	if (platform !== "win32") return;
 	if (!/^[A-Za-z]:\\/.test(path)) throw new Error(`memory root is not a local fixed drive: ${path}`);
-	if ((await driveIsLocalFixed(path.charAt(0))) === false)
-		throw new Error(`memory root is not a local fixed drive: ${path}`);
+	if (!(await driveIsLocalFixed(path.charAt(0)))) throw new Error(`memory root is not a local fixed drive: ${path}`);
 }
