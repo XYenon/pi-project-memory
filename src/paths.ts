@@ -102,6 +102,37 @@ export function normalizePathInput(base: string, input: string, platform: NodeJS
 	return platform === "win32" ? normalizeWindowsPathInput(base, input) : normalizePosixPathInput(base, input);
 }
 
+/**
+ * Normalize for bash operations: handle home, spaces, extended prefixes,
+ * but do NOT resolve symlinks. This keeps symlinks themselves intact so
+ * background Bash can delete them as they are, not by following to the target.
+ */
+export function normalizePathLexical(
+	base: string,
+	input: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	return platform === "win32" ? normalizeWindowsBashPathInput(base, input) : normalizePosixPathInput(base, input);
+}
+
+function normalizeWindowsBashPathInput(base: string, input: string): string {
+	let path = input.replace(ASCII_SPACES, " ").replace(/^@/, "").trim();
+	if (path.startsWith("file://")) path = fileURLToPath(path);
+	path = expandHome(path, true);
+	path = stripExtendedPrefix(path);
+	path = expandWindowsMount(path);
+	if (WINDOWS_DRIVE.test(path) && !WINDOWS_ABSOLUTE_DRIVE.test(path))
+		throw new Error(`Drive-relative paths are not supported: ${input}`);
+	// Resolve relative to base but without resolving symlinks
+	const resolved = win32.resolve(base, path);
+	// `\\?\` extended paths carry a colon past the drive; `canonicalWindowsPath`
+	// with a non-existent path falls back to `win32.resolve`, so just strip the
+	// prefix instead before the ADS check.
+	const stripped = stripExtendedPrefix(resolved);
+	if (stripped.slice(2).includes(":")) throw new Error(`Alternate data streams are not supported: ${input}`);
+	return stripped;
+}
+
 /** Match Pi native tool path normalization on the supported platforms. */
 export function resolveToolPath(cwd: string, input: string): string {
 	return normalizePathInput(cwd, input);
@@ -110,6 +141,44 @@ export function resolveToolPath(cwd: string, input: string): string {
 /** `.md` is case-insensitive on Windows; POSIX keeps the lowercase contract. */
 export function isMarkdownPath(path: string, platform: NodeJS.Platform = process.platform): boolean {
 	return platform === "win32" ? /\.md$/i.test(path) : path.endsWith(".md");
+}
+
+/** Windows reports symlinks and junctions through the reparse attribute. */
+export function isReparsePoint(info: { isSymbolicLink(): boolean }): boolean {
+	return info.isSymbolicLink();
+}
+
+/**
+ * Walk every ancestor of a file path and reject when one is a reparse point.
+ * This closes the `realpath` gap where a junction chains to an escaped root.
+ */
+export async function rejectReparsePathAncestor(filePath: string): Promise<void> {
+	const segments = filePath.split(sep);
+	let current = "";
+	for (const segment of segments) {
+		if (!segment) continue;
+		current = current ? `${current}${sep}${segment}` : segment;
+		if (segment === "" || /^[a-zA-Z]:$/.test(segment)) continue;
+		const segmentPath = current;
+		let info: import("node:fs").Stats;
+		try {
+			info = await lstat(segmentPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+			throw error;
+		}
+		if (isReparsePoint(info))
+			throw new Error(`Memory path traverses a symlink or junction: ${current}`);
+	}
+}
+
+/** Reject memory roots that are themselves junctions or symlinks. */
+export async function rejectReparseRoot(path: string): Promise<void> {
+	const info = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
+	});
+	if (info && isReparsePoint(info)) throw new Error(`Memory root must not be a symlink or junction: ${path}`);
 }
 
 export function containsVcsMetadataSegment(path: string): boolean {
@@ -356,12 +425,14 @@ async function ensurePrivateDirectory(path: string, label: string, followLinks =
 	await mkdir(path, { recursive: true, mode: 0o700 });
 	const info = followLinks ? await stat(path) : await lstat(path);
 	if (!info.isDirectory()) throw new Error(`${label} must be a directory`);
-	if (!existed) await chmod(path, 0o700);
+	// Windows cannot set owner/group/other mode bits; POSIX privacy stays 0o700.
+	if (!existed && process.platform !== "win32") await chmod(path, 0o700);
 }
 
 export async function initializeProjectPaths(paths: ProjectPaths): Promise<void> {
 	await ensurePrivateDirectory(paths.baseDir, "Project memory state root");
 	await ensurePrivateDirectory(paths.memoryDir, "Memory root", true);
+	await rejectReparseRoot(paths.memoryDir);
 	await ensurePrivateDirectory(paths.locksDir, "Lock root");
 	const namespaceDir = paths.namespaceDir ?? paths.baseDir;
 	if (!(await reserveNamespace(namespaceDir, paths.projectRoot)))
@@ -412,7 +483,7 @@ export function assertContainedMarkdown(
 	candidate: string,
 	platform: NodeJS.Platform = process.platform,
 ): string {
-	const absolute = normalizePathInput(root, candidate, platform);
+	const absolute = normalizePathLexical(root, candidate, platform);
 	if (!isContainedPath(root, absolute, platform)) throw new Error(`Path escapes the memory directory: ${candidate}`);
 	if (!isMarkdownPath(absolute, platform))
 		throw new Error(`Memory writes and deletes require a .md path: ${candidate}`);

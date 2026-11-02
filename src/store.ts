@@ -15,6 +15,7 @@ import {
 	utimes,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { hostname } from "node:os";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import fg from "fast-glob";
 import YAML from "yaml";
@@ -23,6 +24,7 @@ import {
 	containsVcsMetadataSegment,
 	isContainedPath,
 	isMarkdownPath,
+	rejectReparsePathAncestor,
 	resolveToolPath,
 	VCS_METADATA_DIRECTORIES,
 } from "./paths.ts";
@@ -39,12 +41,52 @@ export const TOPIC_BYTE_CAP = 4096;
 export const TOPIC_SCAN_CAP = 200;
 const TOPIC_SCAN_CONCURRENCY = 16;
 
-const NO_FOLLOW_READ = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
-
 const DEFAULT_STATE: ProjectMemoryState = {
 	schemaVersion: 1,
 	lastDreamAt: 0,
 };
+
+/** Windows locking codes: retry only these for idempotent steps. */
+const RETRYABLE_LOCK_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+
+/** Process-wide start-time token used in lock payloads to identify a process start. */
+const PROCESS_START_TOKEN = randomUUID();
+
+/**
+ * Retry an idempotent operation with bounded exponential backoff and jitter.
+ * Only EPERM, EBUSY, and EACCES are retried; other errors propagate immediately.
+ * 5 attempts, base 50ms, max 800ms, with random jitter up to base.
+ */
+async function retryIdempotent<T>(operation: () => Promise<T>, label: string): Promise<T> {
+	const attempts = 5;
+	const baseDelayMs = 50;
+	let lastError: NodeJS.ErrnoException | undefined;
+
+	for (let attempt = 1; attempt <= attempts; attempt++) {
+		try {
+			return await operation();
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (!code || !RETRYABLE_LOCK_CODES.has(code) || attempt >= attempts) {
+				lastError = error as NodeJS.ErrnoException;
+				throw error;
+			}
+			// Exponential backoff with jitter
+			const delay = baseDelayMs * (2 ** (attempt - 1)) + Math.random() * baseDelayMs;
+			await new Promise((resolve) => setTimeout(resolve, delay));
+		}
+	}
+	// Should never reach here, but TypeScript needs exhaustiveness
+	throw lastError ?? new Error(`${label} failed after retries with unknown error`);
+}
+
+interface LockOwner {
+	pid: number;
+	token: string;
+	acquiredAt: number;
+	startToken: string;
+	hostname: string;
+}
 
 export function sha256(content: string | Buffer): string {
 	return createHash("sha256").update(content).digest("hex");
@@ -66,7 +108,8 @@ export function truncateIndex(raw: string): string {
 }
 
 export async function readRegularFileNoFollow(filePath: string): Promise<string> {
-	const handle = await open(filePath, NO_FOLLOW_READ);
+	await rejectReparsePathAncestor(filePath);
+	const handle = await open(filePath);
 	try {
 		const before = await handle.stat();
 		if (!before.isFile()) throw new Error(`Not a regular file: ${filePath}`);
@@ -393,7 +436,8 @@ export function lintMemoryContent(
 }
 
 async function fileSnapshot(filePath: string): Promise<{ content: string; baseline: ReadBaseline }> {
-	const handle = await open(filePath, NO_FOLLOW_READ);
+	await rejectReparsePathAncestor(filePath);
+	const handle = await open(filePath);
 	try {
 		const before = await handle.stat();
 		if (!before.isFile()) throw new Error(`Not a regular file: ${filePath}`);
@@ -448,13 +492,25 @@ async function publishFile(
 				// Android SELinux can prohibit hard links even in Termux's private storage.
 				// Exclusive copying still refuses existing targets, but is not atomic for readers.
 				if (process.platform === "android") await copyFile(temporary, filePath, constants.COPYFILE_EXCL);
-				else await link(temporary, filePath);
+				else {
+					// Retry hard link creation for locking errors
+					await retryIdempotent(() => link(temporary, filePath), "hard link");
+				}
 			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code === "EEXIST") return false;
+				if (code === "EPERM" || code === "ENOSYS" || code === "ENOTSUP" || code === "EXDEV") {
+					throw new Error(
+						`Hard link failed for ${filePath} (${code}): use a different filesystem or check write permissions`,
+					);
+				}
 				throw error;
 			}
 			await rm(temporary);
-		} else await rename(temporary, filePath);
+		} else {
+			// Rename may hit EPERM on open handles; retry
+			await retryIdempotent(() => rename(temporary, filePath), "rename");
+		}
 		return true;
 	} finally {
 		await rm(temporary, { force: true }).catch(() => {});
@@ -510,7 +566,8 @@ function dreamStateFile(paths: ProjectPaths): string {
 async function readStateFile(filePath: string): Promise<ProjectMemoryState | undefined> {
 	let handle: Awaited<ReturnType<typeof open>>;
 	try {
-		handle = await open(filePath, NO_FOLLOW_READ);
+		await rejectReparsePathAncestor(filePath);
+		handle = await open(filePath);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw error;
@@ -584,7 +641,8 @@ export async function compareAndSwapLastDreamAt(
 const SESSION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
 async function readSessionHeader(filePath: string): Promise<{ id: string; cwd?: string; mtimeMs: number } | undefined> {
-	const handle = await open(filePath, NO_FOLLOW_READ);
+	await rejectReparsePathAncestor(filePath);
+	const handle = await open(filePath);
 	try {
 		const info = await handle.stat();
 		if (!info.isFile()) return undefined;
@@ -646,13 +704,8 @@ async function canonicalSessionProjectRoot(cwd: string): Promise<string | undefi
 	}
 }
 
-interface LockOwner {
-	pid: number;
-	token: string;
-	acquiredAt: number;
-}
-
 function processIsAlive(pid: number): boolean {
+	if (pid === 0) return false;
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -661,11 +714,25 @@ function processIsAlive(pid: number): boolean {
 	}
 }
 
+interface LockOwner {
+	pid: number;
+	token: string;
+	acquiredAt: number;
+	startToken: string;
+	hostname: string;
+}
+
 async function readLockOwner(lockFile: string): Promise<LockOwner | undefined> {
 	try {
 		const parsed = JSON.parse(await readRegularFileNoFollow(lockFile)) as Partial<LockOwner>;
 		return Number.isSafeInteger(parsed.pid) && typeof parsed.token === "string" && Number.isFinite(parsed.acquiredAt)
-			? { pid: Number(parsed.pid), token: parsed.token, acquiredAt: Number(parsed.acquiredAt) }
+			? {
+					pid: Number(parsed.pid),
+					token: parsed.token,
+					acquiredAt: Number(parsed.acquiredAt),
+					startToken: typeof parsed.startToken === "string" ? parsed.startToken : "",
+					hostname: typeof parsed.hostname === "string" ? parsed.hostname : "",
+			  }
 			: undefined;
 	} catch {
 		return undefined;
@@ -743,7 +810,13 @@ export async function acquireLock(lockFile: string, staleMs: number): Promise<Lo
 	const lockDirectoryInfo = await lstat(lockDirectory);
 	if (!lockDirectoryInfo.isDirectory() || lockDirectoryInfo.isSymbolicLink())
 		throw new Error(`Lock directory must be a real directory: ${lockDirectory}`);
-	const owner: LockOwner = { pid: process.pid, token: randomUUID(), acquiredAt: Date.now() };
+	const owner: LockOwner = {
+		pid: process.pid,
+		token: randomUUID(),
+		acquiredAt: Date.now(),
+		startToken: PROCESS_START_TOKEN,
+		hostname: hostname(),
+	};
 	const recoveryFile = `${lockFile}.recover`;
 	// A recovery claim serializes stale-owner takeover. A malformed claim fails
 	// closed while fresh, then becomes reclaimable like another stale lock.
@@ -819,7 +892,8 @@ async function markdownSnapshotEntry(
 	filePath: string,
 	previous?: MarkdownSnapshotEntry,
 ): Promise<MarkdownSnapshotEntry> {
-	const handle = await open(filePath, NO_FOLLOW_READ);
+	await rejectReparsePathAncestor(filePath);
+	const handle = await open(filePath);
 	try {
 		const before = await handle.stat();
 		if (!before.isFile()) throw new Error(`Not a regular file: ${filePath}`);
@@ -854,7 +928,7 @@ export async function readMarkdownFileSnapshot(
 ): Promise<{ content: string; snapshot: MarkdownSnapshotEntry } | undefined> {
 	const absolute = markdownAbsolutePath(memoryDir, relativePath);
 	if (!absolute) return undefined;
-	const handle = await open(absolute, NO_FOLLOW_READ).catch(() => undefined);
+	const handle = await open(absolute).catch(() => undefined);
 	if (!handle) return undefined;
 	try {
 		const before = await handle.stat();
@@ -946,18 +1020,23 @@ export async function safeDeleteMemoryFile(
 	guard?: () => void | Promise<void>,
 ): Promise<void> {
 	const [canonicalRoot, canonicalParent] = await Promise.all([realpath(memoryDir), realpath(dirname(filePath))]);
-	const canonicalFile = join(canonicalParent, basename(filePath));
-	if (!isContainedPath(canonicalRoot, canonicalFile) || !isMarkdownPath(canonicalFile))
+	// Keep the requested file itself intact when it is a symlink; do not follow it.
+	const deleteTarget = await lstat(filePath).then(
+		(info) => (info.isSymbolicLink() ? filePath : join(canonicalParent, basename(filePath))),
+		() => join(canonicalParent, basename(filePath)),
+	);
+	if (!isContainedPath(canonicalRoot, deleteTarget) || !isMarkdownPath(deleteTarget))
 		throw new Error("delete target is outside memory or is not a .md file");
 	const release = lockFile ? await acquireLock(lockFile, 15 * 60_000) : undefined;
-	if (lockFile && !release) throw new Error(`Another memory writer is modifying ${canonicalFile}`);
+	if (lockFile && !release) throw new Error(`Another memory writer is modifying ${deleteTarget}`);
 	try {
 		await guard?.();
-		await withFileMutationQueue(canonicalFile, async () => {
-			if (expected && !sameBaseline(await baseline(canonicalFile), expected))
-				throw new Error(`File changed since it was read: ${canonicalFile}. Read it again before deleting.`);
+		await withFileMutationQueue(deleteTarget, async () => {
+			if (expected && !sameBaseline(await baseline(deleteTarget), expected))
+				throw new Error(`File changed since it was read: ${deleteTarget}. Read it again before deleting.`);
 			await guard?.();
-			await rm(canonicalFile);
+			// Retry delete for Windows locking errors
+			await retryIdempotent(() => rm(deleteTarget), "delete");
 		});
 	} finally {
 		await release?.();

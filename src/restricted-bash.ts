@@ -2,7 +2,7 @@ import { realpath } from "node:fs/promises";
 import { relative, resolve, sep, win32 } from "node:path";
 import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
 import { classifyReadOnlyBash, parseStaticBashCommand } from "./bash-readonly.ts";
-import { assertBashCwdBudget, assertContainedMarkdown, normalizePathInput, VCS_METADATA_DIRECTORIES } from "./paths.ts";
+import { assertBashCwdBudget, assertContainedMarkdown, normalizePathLexical, VCS_METADATA_DIRECTORIES } from "./paths.ts";
 
 export interface RestrictedBashPolicy {
 	memoryDir: string;
@@ -52,7 +52,13 @@ function parseDelete(
 	memoryDir: string,
 	platform: NodeJS.Platform,
 ): { paths: string[]; force: boolean } | undefined {
-	const argv = parseStaticBashCommand(command);
+	// On Windows the typed command often uses backslash paths, but the bash
+	// grammar treats `\` as an escape, so `C:\Users\...` parses to `C:Users...`
+	// and loses its drive/root. Forward slashes are valid path separators on
+	// Windows, so normalize them before parsing without touching semantics of
+	// flags (which never contain backslashes).
+	const parsedCommand = platform === "win32" ? command.replace(/\\/g, "/") : command;
+	const argv = parseStaticBashCommand(parsedCommand);
 	if (argv?.[0] !== "rm") return undefined;
 	const paths: string[] = [];
 	let operands = false;
@@ -68,8 +74,10 @@ function parseDelete(
 		}
 		if (!operands && raw.startsWith("-")) throw new Error("rm permits only -f or --force");
 		if (!isAbsoluteOperand(raw, platform)) throw new Error("rm requires absolute, non-glob Markdown paths");
-		// Normalize a copy for validation; the typed command itself is never rewritten.
-		const normalized = normalizePathInput(memoryDir, raw, platform);
+		// Normalize without resolving symlinks so a memory-internal link stays the
+		// link itself. The typed command is never rewritten; `path` is only used for
+		// validation and the delete call.
+		const normalized = normalizePathLexical(memoryDir, raw, platform);
 		if (/[*?[]/.test(normalized)) throw new Error("rm requires absolute, non-glob Markdown paths");
 		const path = assertContainedMarkdown(memoryDir, normalized, platform);
 		const flavor = platform === "win32" ? win32 : undefined;
