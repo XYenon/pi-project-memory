@@ -649,11 +649,11 @@ test("reads can follow symlinks while writes stay contained and rm needs no read
 	const target = join(memoryDir, "delete.md");
 	await writeFile(target, "delete me\n");
 	const bash = tools.get("bash")!;
-	assert.notEqual((await bash.execute("unread", { command: `rm --force ${target}` })).isError, true);
+	assert.notEqual((await bash.execute("unread", { command: `rm --force '${target}'` })).isError, true);
 	await writeFile(target, "read version\n");
 	await tools.get("read")!.execute("read", { path: target });
 	await writeFile(target, "changed\n");
-	assert.notEqual((await bash.execute("stale", { command: `rm -f -- ${target}` })).isError, true);
+	assert.notEqual((await bash.execute("stale", { command: `rm -f -- '${target}'` })).isError, true);
 	await assert.rejects(readFile(target), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 
 	for (const protectedName of ["agents", ".git"]) {
@@ -662,11 +662,12 @@ test("reads can follow symlinks while writes stay contained and rm needs no read
 		await mkdir(protectedDir);
 		await writeFile(protectedFile, "protected\n");
 		await tools.get("read")!.execute(`read-${protectedName}`, { path: protectedFile });
-		assert.equal((await bash.execute(`delete-${protectedName}`, { command: `rm ${protectedFile}` })).isError, true);
+		assert.equal((await bash.execute(`delete-${protectedName}`, { command: `rm '${protectedFile}'` })).isError, true);
 		assert.equal(await readFile(protectedFile, "utf8"), "protected\n");
 	}
 	assert.equal(
-		(await bash.execute("long-force", { command: `rm --force ${join(memoryDir, "agents", "protected.md")}` })).isError,
+		(await bash.execute("long-force", { command: `rm --force '${join(memoryDir, "agents", "protected.md")}'` }))
+			.isError,
 		true,
 	);
 });
