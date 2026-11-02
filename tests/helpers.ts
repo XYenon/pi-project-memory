@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { TestContext } from "node:test";
@@ -28,7 +28,7 @@ export async function removeTempDirectory(directory: string): Promise<void> {
 }
 
 export async function createTempDirectory(t: TestContext, prefix: string): Promise<string> {
-	const root = await mkdtemp(join(tmpdir(), prefix));
+	const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
 	t.after(() => removeTempDirectory(root));
 	return root;
 }

@@ -414,8 +414,9 @@ test("missing Git Bash disables bash, notifies once, and reports the exact statu
 	const toolSets: string[][] = [];
 	const checkTools = (context: Context) => {
 		toolSets.push((context.tools ?? []).map((tool) => tool.name).sort());
-		assert.match(context.systemPrompt ?? "", /Shell access is unavailable in this run/);
-		assert.doesNotMatch(context.systemPrompt ?? "", /read-only bash/);
+		const messages = JSON.stringify(context.messages);
+		assert.match(messages, /Shell access is unavailable in this run/);
+		assert.doesNotMatch(messages, /read-only bash/);
 	};
 	harness.faux.setResponses([
 		(context) => {

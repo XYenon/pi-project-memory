@@ -6,6 +6,7 @@ import { join, relative } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { createChildTools } from "../src/child-tools.ts";
+import { normalizePathInput } from "../src/paths.ts";
 import { probeShell } from "../src/shell.ts";
 import { createToolWorkspace, skipOnWindows } from "./helpers.ts";
 
@@ -329,7 +330,8 @@ test("all background tools inherit the parent cwd for both roles", async (t) => 
 		}
 		const pwd = await tools.get("bash")!.execute("pwd", { command: "pwd" });
 		assert.notEqual(pwd.isError, true);
-		assert.equal(pwd.content[0]?.type === "text" && pwd.content[0].text.trim(), await realpath(cwd));
+		assert.equal(pwd.content[0]?.type, "text");
+		assert.equal(normalizePathInput(cwd, pwd.content[0].text.trim()), await realpath(cwd));
 		const bashRead = await tools.get("bash")!.execute("relative-read", { command: "cat fact.md" });
 		assert.notEqual(bashRead.isError, true);
 		assert.match(JSON.stringify(bashRead.content), /parent fact/);
