@@ -8,7 +8,7 @@ import { sanitizeMemoryText } from "../src/sanitize.ts";
 import { acquireLock, readIndex, recallTopic, scanTopics, sha256 } from "../src/store.ts";
 import { createToolWorkspace } from "./helpers.ts";
 
-test("local memory reads follow links and decode NUL and invalid UTF-8 like Claude", async (t) => {
+test("local memory reads preserve platform link policy and decode NUL and invalid UTF-8", async (t) => {
 	const env = await createToolWorkspace(t, "pi-memory-local-read-");
 	const source = join(env.root, "source.md");
 	await writeFile(source, Buffer.concat([Buffer.from("fact\0"), Buffer.from([0xff]), Buffer.from("\n")]));
@@ -16,15 +16,21 @@ test("local memory reads follow links and decode NUL and invalid UTF-8 like Clau
 	await symlink(source, join(env.memoryDir, "MEMORY.md"));
 	const expected = "fact\0�\n";
 	assert.equal(await readIndex(env.memoryDir), expected.trim());
+	const topicName = process.platform === "win32" ? "regular.md" : "linked.md";
+	const topicSource = process.platform === "win32" ? join(env.memoryDir, topicName) : source;
+	if (process.platform === "win32") {
+		assert.deepEqual(await scanTopics(env.memoryDir), []);
+		await writeFile(topicSource, await readFile(source));
+	}
 	const topics = await scanTopics(env.memoryDir);
 	assert.equal(topics.length, 1);
 	assert.ok(topics[0]);
-	assert.equal(topics[0].filename, "linked.md");
+	assert.equal(topics[0].filename, topicName);
 	const recall = await recallTopic(topics[0]);
 	assert.equal(recall.content, expected);
 	assert.equal(sanitizeMemoryText(recall.content), "fact�\n");
-	await writeFile(source, "updated fact\n");
-	await utimes(source, new Date(0), new Date(0));
+	await writeFile(topicSource, "updated fact\n");
+	await utimes(topicSource, new Date(0), new Date(0));
 	assert.equal((await recallTopic(topics[0])).content, "updated fact\n");
 });
 
