@@ -19,8 +19,7 @@ const WINDOWS_ABSOLUTE_DRIVE = /^[a-zA-Z]:[\\/]/;
 
 function stripExtendedPrefix(path: string): string {
 	if (/^\\\\\?\\UNC\\/i.test(path)) return `\\\\${path.slice(8)}`;
-	if (/^\\\\\?\\/i.test(path)) return path.slice(4);
-	if (/^\\\\\.\\/i.test(path)) return path.slice(4);
+	if (/^\\\\[?.]\\/.test(path)) return path.slice(4);
 	return path;
 }
 
@@ -65,9 +64,9 @@ export function normalizePathLexical(
 	const windows = platform === "win32";
 	const flavor = windows ? win32 : posix;
 	let path = input.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
-	if (path.startsWith("file://")) path = fileURLToPath(path);
 	if (path === "~") path = homedir();
 	else if (windows ? /^~[\\/]/.test(path) : path.startsWith("~/")) path = flavor.join(homedir(), path.slice(2));
+	else if (path.startsWith("file://")) path = fileURLToPath(path);
 	if (!windows) return flavor.resolve(base, path);
 	path = stripExtendedPrefix(path).replace(
 		/^\/(?:(?:mnt|cygdrive)\/)?([a-zA-Z])(?=\/|$)/,
@@ -85,9 +84,9 @@ export function resolveToolPath(cwd: string, input: string): string {
 	return normalizePathInput(cwd, input);
 }
 
-/** `.md` is case-insensitive on Windows; POSIX keeps the lowercase contract. */
-export function isMarkdownPath(path: string, platform: NodeJS.Platform = process.platform): boolean {
-	return platform === "win32" ? /\.md$/i.test(path) : path.endsWith(".md");
+/** Markdown extensions compare case-insensitively on every platform. */
+export function isMarkdownPath(path: string): boolean {
+	return /\.md$/i.test(path);
 }
 
 /**
@@ -385,9 +384,8 @@ export function assertContainedMarkdown(
 	candidate: string,
 	platform: NodeJS.Platform = process.platform,
 ): string {
-	const absolute = normalizePathLexical(root, candidate, platform);
+	const absolute = normalizePathLexical(process.cwd(), candidate, platform);
 	if (!isContainedPath(root, absolute, platform)) throw new Error(`Path escapes the memory directory: ${candidate}`);
-	if (!isMarkdownPath(absolute, platform))
-		throw new Error(`Memory writes and deletes require a .md path: ${candidate}`);
+	if (!isMarkdownPath(absolute)) throw new Error(`Memory writes and deletes require a .md path: ${candidate}`);
 	return absolute;
 }

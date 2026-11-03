@@ -458,7 +458,7 @@ test("missing Git Bash disables bash, notifies once, and reports the exact statu
 	);
 	harness.context.mode = "rpc";
 	await harness.extension.commands.get("memory")?.handler("status", harness.context);
-	assert.match(harness.notices.at(-1)?.message ?? "", new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	assert.ok(harness.notices.at(-1)?.message.includes(expected));
 	await harness.extension.commands.get("memory")?.handler("reload-config", harness.context);
 	await harness.extension.commands.get("memory")?.handler("status", harness.context);
 	assert.ok(harness.notices.at(-1)?.message.includes(`Git Bash: rejected (${missing} is not Git Bash)`));

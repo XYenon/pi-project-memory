@@ -68,12 +68,12 @@ async function defaultValidate(path: string): Promise<string | undefined> {
 	}
 }
 
-function rejection(path: string, output: string | undefined, exists: boolean): ShellAvailability {
+function rejection(path: string, detail: ShellRejectionDetail): ShellAvailability {
 	return {
 		available: false,
 		reason: "rejected",
 		path,
-		detail: !exists ? "missing" : /^Linux\b/i.test(output?.trim() ?? "") ? "wsl" : "invalid",
+		detail,
 	};
 }
 
@@ -97,11 +97,11 @@ export async function probeShell(options: ShellProbeOptions = {}): Promise<Shell
 		if (!(await exists(candidate))) return undefined;
 		const version = await validate(candidate);
 		if (isGitBashVersion(version)) return { available: true, path: candidate };
-		rejected ??= rejection(candidate, version, true);
+		rejected ??= rejection(candidate, /^Linux\b/i.test(version?.trim() ?? "") ? "wsl" : "invalid");
 		return undefined;
 	};
 
-	if (explicit) return (await check(explicit)) ?? rejected ?? rejection(explicit, undefined, false);
+	if (explicit) return (await check(explicit)) ?? rejected ?? rejection(explicit, "missing");
 
 	const localAppData = env.LOCALAPPDATA?.trim();
 	const fixed = [DEFAULT_GIT_BASH_PATH];

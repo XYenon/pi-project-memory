@@ -296,19 +296,21 @@ test("isContainedPath case-folds Windows paths and rejects sibling prefixes", ()
 	assert.equal(isContainedPath("C:\\memory", "C:\\memory\\link\\secret.md", "win32"), true);
 });
 
-test("assertContainedMarkdown accepts FOO.MD on Windows and rejects ADS", () => {
+test("assertContainedMarkdown accepts FOO.MD on every platform and rejects ADS", () => {
+	assert.equal(assertContainedMarkdown(process.cwd(), "topic.MD"), join(process.cwd(), "topic.MD"));
+	assert.throws(() => assertContainedMarkdown(join(process.cwd(), "memory"), "topic.MD"), /escapes/);
 	assert.equal(assertContainedMarkdown("C:\\memory", "C:\\memory\\FOO.MD", "win32"), "C:\\memory\\FOO.MD");
 	assert.equal(assertContainedMarkdown("/memory", "/memory/topic.md", "linux"), "/memory/topic.md");
-	assert.throws(() => assertContainedMarkdown("/memory", "/memory/FOO.MD", "linux"), /\.md/);
+	assert.equal(assertContainedMarkdown("/memory", "/memory/FOO.MD", "linux"), "/memory/FOO.MD");
 	assert.throws(() => assertContainedMarkdown("C:\\memory", "C:\\memory\\notes.md:stream.md", "win32"), /data streams/);
 	assert.throws(() => assertContainedMarkdown("C:\\memory", "C:\\memory-evil\\a.md", "win32"), /escapes/);
 });
 
-test("isMarkdownPath matches the index and topics case-insensitively on Windows", () => {
-	assert.equal(isMarkdownPath("FOO.MD", "win32"), true);
-	assert.equal(isMarkdownPath("MEMORY.MD", "win32"), true);
-	assert.equal(isMarkdownPath("FOO.MD", "linux"), false);
-	assert.equal(isMarkdownPath("foo.md", "linux"), true);
+test("isMarkdownPath matches the index and topics case-insensitively", () => {
+	assert.equal(isMarkdownPath("FOO.MD"), true);
+	assert.equal(isMarkdownPath("MEMORY.MD"), true);
+	assert.equal(isMarkdownPath("foo.md"), true);
+	assert.equal(isMarkdownPath("foo.md.txt"), false);
 });
 
 test("a project alias reuses its existing canonical namespace and memory", async (t) => {

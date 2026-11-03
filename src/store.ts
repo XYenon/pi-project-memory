@@ -82,16 +82,14 @@ export async function readRegularFileNoFollow(filePath: string): Promise<string>
 	}
 }
 
-/** The index name compares case-insensitively on Windows, matching NTFS. */
-export function isIndexFilename(name: string, platform: NodeJS.Platform = process.platform): boolean {
-	const base = basename(name);
-	return platform === "win32" ? base.toLowerCase() === INDEX_FILE.toLowerCase() : base === INDEX_FILE;
+/** The index name compares case-insensitively on every platform. */
+export function isIndexFilename(name: string): boolean {
+	return basename(name).toLowerCase() === INDEX_FILE.toLowerCase();
 }
 
 /** Only the root index is reserved; a nested file with the same name stays a topic. */
-function isMemoryIndexPath(relativePath: string, platform: NodeJS.Platform = process.platform): boolean {
-	const normalized = relativePath.split(sep).join("/");
-	return !normalized.includes("/") && isIndexFilename(normalized, platform);
+function isMemoryIndexPath(relativePath: string): boolean {
+	return relativePath.toLowerCase() === INDEX_FILE.toLowerCase();
 }
 
 function indexableFilename(filename: string): boolean {
@@ -102,7 +100,7 @@ function indexableFilename(filename: string): boolean {
 function indexEntry(topic: MemoryTopic): string | null {
 	const filename = topic.filename.split(sep).join("/");
 	if (!indexableFilename(filename)) return null;
-	const title = process.platform === "win32" ? basename(filename).replace(/\.md$/i, "") : basename(filename, ".md");
+	const title = basename(filename).replace(/\.md$/i, "");
 	const prefix = `- [${title}](${filename})`;
 	const description = topic.description.replace(/\s+/g, " ").trim();
 	const remaining = 150 - prefix.length - 3;
@@ -201,7 +199,7 @@ async function scanTopicsInternal(
 		followSymbolicLinks: true,
 		dot: false,
 		unique: true,
-		caseSensitiveMatch: process.platform !== "win32",
+		caseSensitiveMatch: false,
 	});
 	const filenames = relativePaths.filter(
 		(path) =>
@@ -885,7 +883,7 @@ export async function snapshotMarkdown(
 		cwd: memoryDir,
 		onlyFiles: true,
 		followSymbolicLinks: false,
-		caseSensitiveMatch: process.platform !== "win32",
+		caseSensitiveMatch: false,
 		ignore: VCS_METADATA_DIRECTORIES.map((directory) => `**/${directory}/**`),
 	})) {
 		const entry = await snapshotMarkdownFile(memoryDir, topic, previous.get(topic));
@@ -909,13 +907,7 @@ export function memoryPathFromToolInput(memoryDir: string, cwd: string, input: R
 	if (typeof input.path === "string") raw = input.path;
 	else if (typeof input.file_path === "string") raw = input.file_path;
 	if (!raw) return null;
-	let absolute: string;
-	try {
-		absolute = resolveToolPath(cwd, raw);
-	} catch {
-		// Unsafe Windows forms (drive-relative paths and ADS) never enter memory.
-		return null;
-	}
+	const absolute = resolveToolPath(cwd, raw);
 	return isContainedPath(memoryDir, absolute) ? absolute : null;
 }
 

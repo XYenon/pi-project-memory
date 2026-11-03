@@ -2,7 +2,7 @@
 
 Status: reduced scope from the closed wayfinder tickets for [Windows support map](https://github.com/fktpp2022/pi-project-memory/issues/1), for review in [Consolidated Windows support spec review](https://github.com/fktpp2022/pi-project-memory/issues/12). The requirements below do not claim completed implementation or verification.
 
-Scope: basic native Windows support for `pi-project-memory` under Pi, with Git Bash optional for background work. macOS, Linux, and Termux behavior stays unchanged.
+Scope: basic native Windows support for `pi-project-memory` under Pi, with Git Bash optional for background work. Markdown extension and index-name comparisons are case-insensitive on every platform. Other macOS, Linux, and Termux behavior stays unchanged.
 
 ## 1. Supported matrix and install
 
@@ -75,7 +75,7 @@ Use shared Windows normalization and containment rules in `resolveToolPath`, `co
 
 Resolve Windows memory roots and existing containing paths with `realpath`. Containment uses case-insensitive Windows path comparisons and filesystem checks. Apply the same rules to read, write, edit, delete, teardown, and index exclusion.
 
-On Windows, `.md` and `MEMORY.md` comparisons are case-insensitive. Scanning uses a case-insensitive pattern and deduplicates by canonical path.
+On every platform, `.md` and `MEMORY.md` comparisons are case-insensitive. Scanning uses a case-insensitive pattern and deduplicates by canonical path.
 
 There is no fixed-drive restriction or PowerShell drive probe. Do not add hardcoded memory path, filename, or Bash working-directory length budgets. Filesystem and process errors report platform limits when encountered.
 

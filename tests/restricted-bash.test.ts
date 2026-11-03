@@ -107,22 +107,19 @@ test("rm normalizes every accepted Windows operand form before containment", asy
 	);
 });
 
-test("rm deletes an uppercase .MD topic on Windows and still rejects it on POSIX", async (t) => {
+test("rm deletes an uppercase .MD topic on every platform", async (t) => {
 	const env = await createToolWorkspace(t, "pi-memory-rm-case-");
 	const path = join(env.memoryDir, "FOO.MD");
 	await writeFile(path, "uppercase topic\n");
 	const command = `rm '${path}'`;
-	if (process.platform === "win32") {
-		const bash = createChildTools({
-			...env,
-			mode: "extractor",
-			cwd: env.projectRoot,
-			isCurrentGeneration: () => true,
-			touchedPaths: new Set(),
-		}).find((tool) => tool.name === "bash")!;
-		const result = await bash.execute("delete", { command });
-		assert.notEqual(result.isError, true, JSON.stringify(result));
-		await assert.rejects(access(path), { code: "ENOENT" });
-	} else
-		await assert.rejects(prepareRestrictedBash(command, { cwd: env.projectRoot, memoryDir: env.memoryDir }), /\.md/);
+	const bash = createChildTools({
+		...env,
+		mode: "extractor",
+		cwd: env.projectRoot,
+		isCurrentGeneration: () => true,
+		touchedPaths: new Set(),
+	}).find((tool) => tool.name === "bash")!;
+	const result = await bash.execute("delete", { command });
+	assert.notEqual(result.isError, true, JSON.stringify(result));
+	await assert.rejects(access(path), { code: "ENOENT" });
 });
