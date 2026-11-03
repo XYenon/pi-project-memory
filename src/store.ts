@@ -22,6 +22,8 @@ import {
 	canonicalProjectRoot,
 	containsVcsMetadataSegment,
 	isContainedPath,
+	isMarkdownPath,
+	rejectReparsePathAncestor,
 	resolveToolPath,
 	VCS_METADATA_DIRECTORIES,
 } from "./paths.ts";
@@ -38,7 +40,7 @@ export const TOPIC_BYTE_CAP = 4096;
 export const TOPIC_SCAN_CAP = 200;
 const TOPIC_SCAN_CONCURRENCY = 16;
 
-const NO_FOLLOW_READ = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+const NO_FOLLOW_READ = constants.O_RDONLY | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0));
 
 const DEFAULT_STATE: ProjectMemoryState = {
 	schemaVersion: 1,
@@ -65,6 +67,7 @@ export function truncateIndex(raw: string): string {
 }
 
 export async function readRegularFileNoFollow(filePath: string): Promise<string> {
+	await rejectReparsePathAncestor(filePath);
 	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const before = await handle.stat();
@@ -79,6 +82,19 @@ export async function readRegularFileNoFollow(filePath: string): Promise<string>
 	}
 }
 
+/** Match the platform's index-name casing rules. */
+export function isIndexFilename(name: string, platform: NodeJS.Platform = process.platform): boolean {
+	const base = basename(name);
+	return platform === "win32" ? base.toLowerCase() === INDEX_FILE.toLowerCase() : base === INDEX_FILE;
+}
+
+/** Only the root index is reserved; a nested file with the same name stays a topic. */
+function isMemoryIndexPath(relativePath: string): boolean {
+	return process.platform === "win32"
+		? relativePath.toLowerCase() === INDEX_FILE.toLowerCase()
+		: relativePath === INDEX_FILE;
+}
+
 function indexableFilename(filename: string): boolean {
 	const normalized = filename.split(sep).join("/");
 	return !/[[\]()\n\r\u2028\u2029]/u.test(normalized) && !normalized.split("/").some((part) => part.startsWith("."));
@@ -87,7 +103,7 @@ function indexableFilename(filename: string): boolean {
 function indexEntry(topic: MemoryTopic): string | null {
 	const filename = topic.filename.split(sep).join("/");
 	if (!indexableFilename(filename)) return null;
-	const title = basename(filename, ".md");
+	const title = process.platform === "win32" ? basename(filename).replace(/\.md$/i, "") : basename(filename, ".md");
 	const prefix = `- [${title}](${filename})`;
 	const description = topic.description.replace(/\s+/g, " ").trim();
 	const remaining = 150 - prefix.length - 3;
@@ -183,13 +199,14 @@ async function scanTopicsInternal(
 	const relativePaths = await fg("**/*.md", {
 		cwd: memoryDir,
 		onlyFiles: true,
-		followSymbolicLinks: true,
+		followSymbolicLinks: process.platform !== "win32",
 		dot: false,
 		unique: true,
+		caseSensitiveMatch: process.platform !== "win32",
 	});
 	const filenames = relativePaths.filter(
 		(path) =>
-			path !== INDEX_FILE &&
+			!isMemoryIndexPath(path) &&
 			includeFilename(path) &&
 			!path.split("/").some((part) => RESERVED_MEMORY_DIRECTORIES.has(part.toLowerCase())),
 	);
@@ -200,6 +217,7 @@ async function scanTopicsInternal(
 			filenames.slice(offset, offset + TOPIC_SCAN_CONCURRENCY).map(async (filename) => {
 				const filePath = resolve(memoryDir, filename);
 				if (!isContainedPath(memoryDir, filePath)) throw new Error("escaped memory path");
+				await rejectReparsePathAncestor(filePath);
 				const handle = await open(filePath, constants.O_RDONLY);
 				try {
 					const info = await handle.stat();
@@ -249,6 +267,7 @@ export async function scanTopics(memoryDir: string): Promise<MemoryTopic[]> {
 }
 
 export async function recallTopic(topic: MemoryTopic): Promise<RecallItem> {
+	await rejectReparsePathAncestor(topic.filePath);
 	const handle = await open(topic.filePath, constants.O_RDONLY);
 	try {
 		const info = await handle.stat();
@@ -317,7 +336,7 @@ export function lintMemoryContent(
 	const lineCount = content.replace(/\r\n?/g, "\n").split("\n").length;
 	if (hasUnsafeMemoryText(content))
 		warnings.push(`${basename(filePath)} contains reserved prompt tags or unsafe invisible characters.`);
-	if (basename(filePath) === INDEX_FILE) {
+	if (isIndexFilename(filePath)) {
 		if (content.length > INDEX_CHAR_CAP || lineCount > INDEX_LINE_CAP)
 			warnings.push(
 				`${INDEX_FILE} is ${content.length} characters / ${lineCount} lines, over the automatic context limit. Compact it below ${Math.floor(INDEX_CHAR_CAP * 0.7)} characters and ${Math.floor(INDEX_LINE_CAP * 0.7)} lines now; shorten hooks and remove stale pointers.`,
@@ -363,6 +382,7 @@ export function lintMemoryContent(
 }
 
 async function fileSnapshot(filePath: string): Promise<{ content: string; baseline: ReadBaseline }> {
+	await rejectReparsePathAncestor(filePath);
 	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const before = await handle.stat();
@@ -480,6 +500,7 @@ function dreamStateFile(paths: ProjectPaths): string {
 async function readStateFile(filePath: string): Promise<ProjectMemoryState | undefined> {
 	let handle: Awaited<ReturnType<typeof open>>;
 	try {
+		await rejectReparsePathAncestor(filePath);
 		handle = await open(filePath, NO_FOLLOW_READ);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -554,6 +575,7 @@ export async function compareAndSwapLastDreamAt(
 const SESSION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
 async function readSessionHeader(filePath: string): Promise<{ id: string; cwd?: string; mtimeMs: number } | undefined> {
+	await rejectReparsePathAncestor(filePath);
 	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const info = await handle.stat();
@@ -789,6 +811,7 @@ async function markdownSnapshotEntry(
 	filePath: string,
 	previous?: MarkdownSnapshotEntry,
 ): Promise<MarkdownSnapshotEntry> {
+	await rejectReparsePathAncestor(filePath);
 	const handle = await open(filePath, NO_FOLLOW_READ);
 	try {
 		const before = await handle.stat();
@@ -813,7 +836,7 @@ async function markdownSnapshotEntry(
 }
 
 function markdownAbsolutePath(memoryDir: string, relativePath: string): string | undefined {
-	if (!relativePath.endsWith(".md") || containsVcsMetadataSegment(relativePath)) return undefined;
+	if (!isMarkdownPath(relativePath) || containsVcsMetadataSegment(relativePath)) return undefined;
 	const absolute = resolve(memoryDir, relativePath);
 	return isContainedPath(memoryDir, absolute) ? absolute : undefined;
 }
@@ -824,6 +847,7 @@ export async function readMarkdownFileSnapshot(
 ): Promise<{ content: string; snapshot: MarkdownSnapshotEntry } | undefined> {
 	const absolute = markdownAbsolutePath(memoryDir, relativePath);
 	if (!absolute) return undefined;
+	await rejectReparsePathAncestor(absolute);
 	const handle = await open(absolute, NO_FOLLOW_READ).catch(() => undefined);
 	if (!handle) return undefined;
 	try {
@@ -864,6 +888,7 @@ export async function snapshotMarkdown(
 		cwd: memoryDir,
 		onlyFiles: true,
 		followSymbolicLinks: false,
+		caseSensitiveMatch: process.platform !== "win32",
 		ignore: VCS_METADATA_DIRECTORIES.map((directory) => `**/${directory}/**`),
 	})) {
 		const entry = await snapshotMarkdownFile(memoryDir, topic, previous.get(topic));
@@ -910,8 +935,10 @@ export async function safeDeleteMemoryFile(
 ): Promise<void> {
 	const [canonicalRoot, canonicalParent] = await Promise.all([realpath(memoryDir), realpath(dirname(filePath))]);
 	const canonicalFile = join(canonicalParent, basename(filePath));
-	if (!isContainedPath(canonicalRoot, canonicalFile) || !canonicalFile.endsWith(".md"))
-		throw new Error("delete target is outside memory or is not lowercase .md");
+	if (!isContainedPath(canonicalRoot, canonicalFile) || !isMarkdownPath(canonicalFile))
+		throw new Error(
+			`delete target is outside memory or is not ${process.platform === "win32" ? "a .md file" : "lowercase .md"}`,
+		);
 	const release = lockFile ? await acquireLock(lockFile, 15 * 60_000) : undefined;
 	if (lockFile && !release) throw new Error(`Another memory writer is modifying ${canonicalFile}`);
 	try {

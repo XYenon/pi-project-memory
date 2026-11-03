@@ -15,8 +15,15 @@ import {
 	generateUnifiedPatch,
 } from "@earendil-works/pi-coding-agent";
 import fg from "fast-glob";
-import { assertContainedMarkdown, isContainedPath, resolveToolPath, VCS_METADATA_DIRECTORIES } from "./paths.ts";
+import {
+	assertContainedMarkdown,
+	isContainedPath,
+	normalizePathLexical,
+	resolveToolPath,
+	VCS_METADATA_DIRECTORIES,
+} from "./paths.ts";
 import { prepareRestrictedBash } from "./restricted-bash.ts";
+import type { ShellAvailability } from "./shell.ts";
 import { atomicWriteIfBaseline, lintMemoryContent, safeDeleteMemoryFile, sameBaseline, sha256 } from "./store.ts";
 import type { ReadBaseline } from "./types.ts";
 
@@ -34,6 +41,8 @@ interface ToolEnvironment {
 	isProjectTrusted?: () => boolean;
 	touchedPaths: Set<string>;
 	onTouched?: (relativePath: string, hash: string | null) => void | Promise<void>;
+	/** Omitted keeps the legacy behavior (bash offered). Production callers always pass the probe result. */
+	shell?: ShellAvailability;
 }
 
 const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
@@ -110,7 +119,9 @@ async function resolveWritablePath(
 	followTarget = true,
 ): Promise<string> {
 	assertChildRunAllowed(env, signal);
-	const absolute = assertContainedMarkdown(env.memoryDir, resolveToolPath(env.cwd, rawPath));
+	// Keep memory-internal symlinks intact: `resolveToolPath` would resolve a link
+	// to its target, which makes deletes of a link delete the target instead.
+	const absolute = assertContainedMarkdown(env.memoryDir, normalizePathLexical(env.cwd, rawPath));
 	const canonicalMemoryRoot = await realpath(env.memoryDir);
 	const expected = resolve(canonicalMemoryRoot, relative(resolve(env.memoryDir), absolute));
 	await ensureSafeParentDirectories(canonicalMemoryRoot, dirname(expected));
@@ -137,6 +148,7 @@ async function memoryPathSet(memoryDir: string, baselines: ReadonlyMap<string, R
 		followSymbolicLinks: false,
 		dot: false,
 		unique: true,
+		caseSensitiveMatch: process.platform !== "win32",
 		ignore: VCS_METADATA_DIRECTORIES.map((directory) => `**/${directory}/**`),
 	});
 	for (const path of baselines.keys()) paths.push(relative(canonicalRoot, path).split(sep).join("/"));
@@ -369,7 +381,15 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 		},
 	};
 
-	const nativeBashShape = createBashTool(env.cwd, { exposeSessionEnvironment: false });
+	if (env.shell && !env.shell.available) return [read, write, edit, find, grep];
+
+	// `shellCommandPrefix` is intentionally not forwarded: background bash starts
+	// from a clean shell. `shellPath` is the only shell setting honored here.
+	const shellPath = env.shell?.path;
+	const nativeBashShape = createBashTool(env.cwd, {
+		exposeSessionEnvironment: false,
+		shellPath,
+	});
 	const bash: typeof nativeBashShape = {
 		...nativeBashShape,
 		description:
@@ -412,7 +432,10 @@ export function createChildTools(env: ToolEnvironment): AgentTool[] {
 					};
 				}
 				if (!env.scratchDir) throw new Error("Restricted Bash requires a private scratch directory");
-				const nativeBash = createBashTool(prepared.cwd, prepared.options);
+				const nativeBash = createBashTool(prepared.cwd, {
+					...prepared.options,
+					shellPath,
+				});
 				const result = await nativeBash.execute(
 					id,
 					{ command: prepared.command, timeout: params.timeout ?? DEFAULT_BASH_TIMEOUT_SECONDS },

@@ -28,7 +28,7 @@ import projectMemoryExtension from "../index.ts";
 import { resolveProjectPaths } from "../src/paths.ts";
 import { mainMemoryPrompt } from "../src/prompts.ts";
 import { readState } from "../src/store.ts";
-import { createTempDirectory } from "./helpers.ts";
+import { createTempDirectory, removeTempDirectory } from "./helpers.ts";
 
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
 
@@ -125,7 +125,7 @@ async function createLifecycleHarness(
 	t.after(async () => {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		await rm(root, { recursive: true, force: true });
+		await removeTempDirectory(root);
 	});
 
 	const faux = createFauxCore({ models: [{ id: "lifecycle-model", reasoning: false }] });
@@ -299,6 +299,41 @@ test("memory panel refreshes disabled configuration without initializing memory 
 	await assert.rejects(access(h.paths.memoryDir));
 });
 
+test("memory status panel probes shell availability and updates it after config reload", async (t) => {
+	for (const enabled of [true, false]) {
+		const config = { enabled, extraction: { enabled: false }, dream: { enabled: false } };
+		const h = await createLifecycleHarness(t, { config });
+		const shellPath = join(h.root, "missing-bash");
+		await writeFile(h.configFile, JSON.stringify({ ...config, shellPath }));
+		const status = (path: string, missing = true) =>
+			process.platform === "win32"
+				? `Git Bash: rejected (${path} ${missing ? "was not found" : "is not Git Bash"})`
+				: `Git Bash: ${path}`;
+		mockMemoryPanel(h.context, async (component) => {
+			const render = () => component.render(240).join("\n");
+			assert.match(render(), /\[Overview\]/);
+			assert.match(render(), process.platform === "win32" ? /Git Bash:/ : /Shell: Pi default/);
+			// Reload clears the cached probe and must update this same panel's overview.
+			for (let i = 0; i < (enabled ? 2 : 1); i++) component.handleInput?.("\u001b[B");
+			component.handleInput?.("\r");
+			await eventually(() => render().includes(status(shellPath)), "reload should probe the configured shell");
+			await writeFile(shellPath, "not an executable");
+			component.handleInput?.("\u001b[B");
+			component.handleInput?.("\r");
+			await eventually(() => render().includes("Panel refreshed."), "refresh should complete in the panel");
+			assert.ok(render().includes(status(shellPath)), "refresh should preserve the cached shell availability");
+			component.handleInput?.("\u001b[A");
+			component.handleInput?.("\r");
+			await eventually(() => render().includes("Reloaded"), "configuration should reload again");
+			assert.ok(render().includes(status(shellPath, false)), "reload should recheck shell availability");
+			component.handleInput?.("\u001b");
+		});
+		await h.extension.commands.get("memory")?.handler("status", h.context);
+		assert.equal(h.notices.length, 0, "shell status should be rendered in the panel");
+		if (!enabled) await assert.rejects(access(h.paths.memoryDir));
+	}
+});
+
 test("manual maintenance stays in one panel and reports completion there", async (t) => {
 	for (const action of ["extract", "dream"] as const) {
 		const h = await createLifecycleHarness(t, {
@@ -397,6 +432,71 @@ test("manual extraction reports task progress and completion even without change
 	assert.doesNotMatch(h.editorSnapshots.at(-1) ?? "", /Memory:/);
 	assert.equal(h.statusUpdates.length, 0, "memory must not add a footer status row");
 	assert.match(h.notices.at(-1)?.message ?? "", /No memory changes needed\./);
+});
+
+test("missing Git Bash disables bash, notifies once, and reports the exact status line", async (t) => {
+	if (process.platform !== "win32") return t.skip("Git Bash availability is only probed on Windows");
+	const missing = join(tmpdir(), `pi-memory-missing-bash-${process.pid}-${Date.now()}.exe`);
+	t.after(() => rm(missing, { force: true }));
+	const harness = await createLifecycleHarness(t, {
+		config: {
+			shellPath: missing,
+			extraction: { idleFlushSeconds: 0 },
+			dream: { enabled: true },
+		},
+	});
+	harness.context.mode = "tui";
+	const topic = join(harness.paths.memoryDir, "fact.md");
+	const toolSets: string[][] = [];
+	const checkTools = (context: Context) => {
+		toolSets.push((context.tools ?? []).map((tool) => tool.name).sort());
+		const messages = JSON.stringify(context.messages);
+		assert.match(messages, /Shell access is unavailable in this run/);
+		assert.doesNotMatch(messages, /read-only bash/);
+	};
+	harness.faux.setResponses([
+		(context) => {
+			checkTools(context);
+			return fauxAssistantMessage(fauxToolCall("write", { path: topic, content: "extracted fact\n" }));
+		},
+		() => fauxAssistantMessage("done"),
+	]);
+	await harness.extension.commands.get("memory")?.handler("extract", harness.context);
+	assert.equal(await readFile(topic, "utf8"), "extracted fact\n");
+	// A changed candidate does not trigger another probe until config reload.
+	await writeFile(missing, "not an executable");
+	harness.faux.setResponses([
+		(context) => {
+			checkTools(context);
+			return fauxAssistantMessage(fauxToolCall("read", { path: topic }));
+		},
+		() =>
+			fauxAssistantMessage(
+				fauxToolCall("edit", {
+					path: topic,
+					edits: [{ oldText: "extracted", newText: "consolidated" }],
+				}),
+			),
+		() => fauxAssistantMessage("done"),
+	]);
+	await harness.extension.commands.get("memory")?.handler("dream", harness.context);
+	assert.equal(await readFile(topic, "utf8"), "consolidated fact\n");
+
+	assert.deepEqual(
+		toolSets,
+		Array.from({ length: 2 }, () => ["edit", "find", "grep", "read", "write"]),
+	);
+	const expected = `Git Bash: rejected (${missing} was not found)`;
+	assert.deepEqual(
+		harness.notices.filter((notice) => notice.message.startsWith("Git Bash:")).map((notice) => notice.message),
+		[expected],
+	);
+	harness.context.mode = "rpc";
+	await harness.extension.commands.get("memory")?.handler("status", harness.context);
+	assert.ok(harness.notices.at(-1)?.message.includes(expected));
+	await harness.extension.commands.get("memory")?.handler("reload-config", harness.context);
+	await harness.extension.commands.get("memory")?.handler("status", harness.context);
+	assert.ok(harness.notices.at(-1)?.message.includes(`Git Bash: rejected (${missing} is not Git Bash)`));
 });
 
 test("Pi lifecycle hooks honor trust, inject memory prompts, and drain shutdown", async (t) => {
@@ -2095,7 +2195,11 @@ test("dream reads live session transcripts without staging or pre-parsing omitte
 	harness.faux.setResponses([
 		async (context) => {
 			assert.match(JSON.stringify(context.messages.at(-1)?.content), /approved/);
-			assert.ok(JSON.stringify(context.messages.at(-1)?.content).includes(harness.sessionDir));
+			const content = context.messages.at(-1)?.content;
+			const lastText = Array.isArray(content)
+				? content.map((block) => (block.type === "text" ? block.text : "")).join("")
+				: String(content ?? "");
+			assert.ok(lastText.includes(harness.sessionDir));
 			await writeFile(source, `${header}\nlive content\n`);
 			return fauxAssistantMessage(fauxToolCall("read", { path: source }));
 		},

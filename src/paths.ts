@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { access, chmod, lstat, mkdir, open, readFile, realpath, rename, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, posix, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -13,13 +14,105 @@ const execFileAsync = promisify(execFile);
 export const VCS_METADATA_DIRECTORIES = [".git", ".hg", ".svn", ".bzr", ".jj", ".sl"] as const;
 const VCS_METADATA_SET = new Set<string>(VCS_METADATA_DIRECTORIES);
 
-/** Match Pi native tool path normalization on the supported Unix platforms. */
-export function resolveToolPath(cwd: string, input: string): string {
+const WINDOWS_DRIVE = /^[a-zA-Z]:/;
+const WINDOWS_ABSOLUTE_DRIVE = /^[a-zA-Z]:[\\/]/;
+
+function stripExtendedPrefix(path: string): string {
+	if (/^\\\\\?\\UNC\\/i.test(path)) return `\\\\${path.slice(8)}`;
+	if (/^\\\\[?.]\\/.test(path)) return path.slice(4);
+	return path;
+}
+
+/** Resolve aliases and on-disk casing, including paths whose final components do not exist yet. */
+function canonicalWindowsPath(path: string): string {
+	const resolved = win32.resolve(path);
+	let current = resolved;
+	const suffix: string[] = [];
+	for (;;) {
+		try {
+			const canonical = stripExtendedPrefix(realpathSync.native(current));
+			return win32.join(canonical, ...suffix);
+		} catch {}
+		const parent = win32.dirname(current);
+		if (parent === current) return resolved;
+		suffix.unshift(win32.basename(current));
+		current = parent;
+	}
+}
+
+/**
+ * The single path-input normalizer. On Windows it accepts native, forward-slash,
+ * MSYS/Cygwin/WSL, home-relative, and extended-length forms and returns the
+ * canonical drive form with on-disk casing. On POSIX it is a no-op for already
+ * canonical paths.
+ */
+export function normalizePathInput(base: string, input: string, platform: NodeJS.Platform = process.platform): string {
+	const lexical = normalizePathLexical(base, input, platform);
+	return platform === "win32" ? canonicalWindowsPath(lexical) : lexical;
+}
+
+/**
+ * Normalize for bash operations: handle home, spaces, extended prefixes,
+ * but do NOT resolve symlinks. This keeps symlinks themselves intact so
+ * background Bash can delete them as they are, not by following to the target.
+ */
+export function normalizePathLexical(
+	base: string,
+	input: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	const windows = platform === "win32";
+	const flavor = windows ? win32 : posix;
 	let path = input.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
 	if (path === "~") path = homedir();
-	else if (path.startsWith("~/")) path = join(homedir(), path.slice(2));
+	else if (windows ? /^~[\\/]/.test(path) : path.startsWith("~/")) path = flavor.join(homedir(), path.slice(2));
 	else if (path.startsWith("file://")) path = fileURLToPath(path);
-	return resolve(cwd, path);
+	if (!windows) return flavor.resolve(base, path);
+	path = stripExtendedPrefix(path).replace(
+		/^\/(?:(?:mnt|cygdrive)\/)?([a-zA-Z])(?=\/|$)/,
+		(_match, drive: string) => `${drive.toUpperCase()}:\\`,
+	);
+	if (WINDOWS_DRIVE.test(path) && !WINDOWS_ABSOLUTE_DRIVE.test(path))
+		throw new Error(`Drive-relative paths are not supported: ${input}`);
+	const resolved = stripExtendedPrefix(flavor.resolve(base, path));
+	if (resolved.slice(2).includes(":")) throw new Error(`Alternate data streams are not supported: ${input}`);
+	return resolved;
+}
+
+/** Match Pi native tool path normalization on the supported platforms. */
+export function resolveToolPath(cwd: string, input: string): string {
+	return normalizePathInput(cwd, input);
+}
+
+/** Windows accepts mixed-case extensions; POSIX keeps the lowercase contract. */
+export function isMarkdownPath(path: string, platform: NodeJS.Platform = process.platform): boolean {
+	return platform === "win32" ? /\.md$/i.test(path) : path.endsWith(".md");
+}
+
+/**
+ * Walk every ancestor of a file path and reject when one is a reparse point.
+ * This closes the `realpath` gap where a junction chains to an escaped root.
+ */
+export async function rejectReparsePathAncestor(filePath: string): Promise<void> {
+	if (process.platform !== "win32") return;
+	for (let current = resolve(filePath); ; current = dirname(current)) {
+		const info = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+			if (error.code === "ENOENT") return undefined;
+			throw error;
+		});
+		if (info?.isSymbolicLink()) throw new Error(`Memory path traverses a symlink or junction: ${current}`);
+		if (dirname(current) === current) return;
+	}
+}
+
+/** Reject memory roots that are themselves junctions or symlinks. */
+export async function rejectReparseRoot(path: string): Promise<void> {
+	if (process.platform !== "win32") return;
+	const info = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
+	});
+	if (info?.isSymbolicLink()) throw new Error(`Memory root must not be a symlink or junction: ${path}`);
 }
 
 export function containsVcsMetadataSegment(path: string): boolean {
@@ -77,7 +170,7 @@ export function sanitizeProjectKey(projectRoot: string): string {
 }
 
 function configuredMemoryDirectory(value: string | null): string | null {
-	if (!value) return null;
+	if (!value || value.includes("\0") || value === "~") return null;
 	let expanded = value;
 	if (/^~[\\/]/.test(value)) {
 		const tail = value.slice(2);
@@ -91,9 +184,18 @@ function configuredMemoryDirectory(value: string | null): string | null {
 		)
 			return null;
 		expanded = join(homedir(), tail);
+	} else if (!isAbsolute(value)) {
+		return null;
 	}
-	if (!isAbsolute(expanded) || expanded.includes("\0")) return null;
-	const normalized = normalize(expanded).replace(/[\\/]+$/, "");
+	let normalized: string;
+	try {
+		normalized = (
+			process.platform === "win32" ? normalizePathLexical(homedir(), expanded) : normalize(expanded)
+		).replace(/[\\/]+$/, "");
+	} catch {
+		// Invalid forms fall back to the project namespace rather than failing startup.
+		return null;
+	}
 	if (
 		normalized.length < 3 ||
 		normalized === sep ||
@@ -115,7 +217,7 @@ async function ensureRealPrivateDirectory(path: string): Promise<void> {
 	const info = await lstat(path);
 	if (!info.isDirectory() || info.isSymbolicLink())
 		throw new Error(`Project memory namespace must be a real directory: ${path}`);
-	await chmod(path, 0o700);
+	if (process.platform !== "win32") await chmod(path, 0o700);
 }
 
 async function readProjectMarker(namespaceDir: string): Promise<string | undefined> {
@@ -164,7 +266,7 @@ async function canonicalNamespacePath(path: string): Promise<string> {
 	const missing: string[] = [];
 	for (;;) {
 		try {
-			return join(await realpath(current), ...missing.reverse()).normalize("NFC");
+			return join(stripExtendedPrefix(await realpath(current)), ...missing.reverse()).normalize("NFC");
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return resolve(path).normalize("NFC");
 		}
@@ -203,7 +305,11 @@ export async function resolveProjectPaths(
 	const namespace = await projectNamespace(agentMemoryRoot, projectKey, projectRoot);
 	const projectBaseDir = join(projectsRoot, namespace);
 	const configured = configuredMemoryDirectory(autoMemoryDirectory);
-	const memoryDir = configured ?? join(projectBaseDir, "memory");
+	let memoryDir = configured ?? join(projectBaseDir, "memory");
+	if (process.platform === "win32") {
+		await rejectReparseRoot(memoryDir);
+		memoryDir = await canonicalNamespacePath(memoryDir);
+	}
 	const memoryNamespace = namespaceHash(await canonicalNamespacePath(memoryDir));
 	// Project state remains isolated. Dream cadence and locks use the canonical
 	// memory root so projects mounting one store coordinate maintenance.
@@ -229,12 +335,14 @@ async function ensurePrivateDirectory(path: string, label: string, followLinks =
 	await mkdir(path, { recursive: true, mode: 0o700 });
 	const info = followLinks ? await stat(path) : await lstat(path);
 	if (!info.isDirectory()) throw new Error(`${label} must be a directory`);
-	if (!existed) await chmod(path, 0o700);
+	// Windows cannot set owner/group/other mode bits; POSIX privacy stays 0o700.
+	if (!existed && process.platform !== "win32") await chmod(path, 0o700);
 }
 
 export async function initializeProjectPaths(paths: ProjectPaths): Promise<void> {
 	await ensurePrivateDirectory(paths.baseDir, "Project memory state root");
 	await ensurePrivateDirectory(paths.memoryDir, "Memory root", true);
+	await rejectReparseRoot(paths.memoryDir);
 	await ensurePrivateDirectory(paths.locksDir, "Lock root");
 	const namespaceDir = paths.namespaceDir ?? paths.baseDir;
 	if (!(await reserveNamespace(namespaceDir, paths.projectRoot)))
@@ -242,19 +350,54 @@ export async function initializeProjectPaths(paths: ProjectPaths): Promise<void>
 }
 
 export function displayPath(path: string): string {
-	return path.startsWith(`${homedir()}${sep}`) ? `~${path.slice(homedir().length)}` : path;
+	const home = homedir();
+	if (process.platform === "win32") {
+		const foldedHome = win32.resolve(home).toLowerCase().replace(/\\+$/, "");
+		const foldedPath = win32.resolve(path).toLowerCase();
+		return foldedPath.startsWith(`${foldedHome}\\`) ? `~${path.slice(home.length)}` : path;
+	}
+	return path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
 }
 
-export function isContainedPath(root: string, candidate: string): boolean {
-	const normalizedRoot = resolve(root);
-	const normalized = resolve(candidate);
-	return normalized === normalizedRoot || normalized.startsWith(`${normalizedRoot}${sep}`);
+/**
+ * The single containment primitive. Windows compares case-folded `path.win32`
+ * forms so drive casing, separators, and junctions name the same root. The
+ * comparison stays lexical on every platform; callers that guard writes,
+ * deletes, and index exclusion resolve both sides with `realpath` first, which
+ * keeps reads able to follow links the way Claude does.
+ */
+export function isContainedPath(
+	root: string,
+	candidate: string,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	if (platform === "win32") {
+		const foldedRoot = win32.resolve(root).toLowerCase().replace(/\\+$/, "");
+		const foldedCandidate = win32.resolve(candidate).toLowerCase().replace(/\\+$/, "");
+		return foldedCandidate === foldedRoot || foldedCandidate.startsWith(`${foldedRoot}\\`);
+	}
+	const normalizedRoot = posix.resolve(root);
+	const normalized = posix.resolve(candidate);
+	return normalized === normalizedRoot || normalized.startsWith(`${normalizedRoot}${posix.sep}`);
 }
 
-export function assertContainedMarkdown(root: string, candidate: string): string {
-	const absolute = resolve(candidate);
-	if (!isContainedPath(root, absolute)) throw new Error(`Path escapes the memory directory: ${candidate}`);
-	if (!absolute.endsWith(".md"))
-		throw new Error(`Memory writes and deletes require a lowercase .md path: ${candidate}`);
+export function assertContainedMarkdown(
+	root: string,
+	candidate: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	let absolute = normalizePathLexical(process.cwd(), candidate, platform);
+	if (platform === "win32") {
+		// Resolve directory aliases, but keep the final link so rm deletes the link itself.
+		absolute = win32.join(
+			normalizePathInput(process.cwd(), win32.dirname(absolute), platform),
+			win32.basename(absolute),
+		);
+	}
+	if (!isContainedPath(root, absolute, platform)) throw new Error(`Path escapes the memory directory: ${candidate}`);
+	if (!isMarkdownPath(absolute, platform))
+		throw new Error(
+			`Memory writes and deletes require a ${platform === "win32" ? "" : "lowercase "}.md path: ${candidate}`,
+		);
 	return absolute;
 }

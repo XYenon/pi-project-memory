@@ -1,8 +1,8 @@
 import { realpath } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
+import { posix, win32 } from "node:path";
 import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
 import { classifyReadOnlyBash, parseStaticBashCommand } from "./bash-readonly.ts";
-import { assertContainedMarkdown, VCS_METADATA_DIRECTORIES } from "./paths.ts";
+import { assertContainedMarkdown, normalizePathLexical, VCS_METADATA_DIRECTORIES } from "./paths.ts";
 
 export interface RestrictedBashPolicy {
 	memoryDir: string;
@@ -40,7 +40,13 @@ const PROTECTED_MEMORY_DIRECTORIES = new Set([
 	"skills",
 ]);
 
-function parseDelete(command: string, memoryDir: string): { paths: string[]; force: boolean } | undefined {
+const WINDOWS_ABSOLUTE_OPERAND = /^(?:[a-zA-Z]:[\\/]|[\\/]|~(?:[\\/]|$))/;
+
+function parseDelete(
+	command: string,
+	memoryDir: string,
+	platform: NodeJS.Platform,
+): { paths: string[]; force: boolean } | undefined {
 	const argv = parseStaticBashCommand(command);
 	if (argv?.[0] !== "rm") return undefined;
 	const paths: string[] = [];
@@ -56,13 +62,17 @@ function parseDelete(command: string, memoryDir: string): { paths: string[]; for
 			continue;
 		}
 		if (!operands && raw.startsWith("-")) throw new Error("rm permits only -f or --force");
-		if (!raw.startsWith("/") || /[*?[]/.test(raw)) throw new Error("rm requires absolute, non-glob Markdown paths");
-		const path = assertContainedMarkdown(memoryDir, raw);
-		if (
-			relative(resolve(memoryDir), path)
-				.split(sep)
-				.some((segment) => PROTECTED_MEMORY_DIRECTORIES.has(segment.toLowerCase()))
-		)
+		const absolute = platform === "win32" ? WINDOWS_ABSOLUTE_OPERAND.test(raw) : raw.startsWith("/");
+		if (!absolute) throw new Error("rm requires absolute, non-glob Markdown paths");
+		// Normalize without resolving symlinks so a memory-internal link stays the
+		// link itself. The typed command is never rewritten; `path` is only used for
+		// validation and the delete call.
+		const normalized = normalizePathLexical(memoryDir, raw, platform);
+		if (/[*?[]/.test(normalized)) throw new Error("rm requires absolute, non-glob Markdown paths");
+		const path = assertContainedMarkdown(memoryDir, normalized, platform);
+		const flavor = platform === "win32" ? win32 : posix;
+		const relativePath = flavor.relative(flavor.resolve(memoryDir), path);
+		if (relativePath.split(flavor.sep).some((segment) => PROTECTED_MEMORY_DIRECTORIES.has(segment.toLowerCase())))
 			throw new Error("rm cannot delete from a protected memory subdirectory");
 		paths.push(path);
 	}
@@ -70,12 +80,16 @@ function parseDelete(command: string, memoryDir: string): { paths: string[]; for
 	return { paths, force };
 }
 
-export async function prepareRestrictedBash(command: string, policy: RestrictedBashPolicy): Promise<PreparedBash> {
+export async function prepareRestrictedBash(
+	command: string,
+	policy: RestrictedBashPolicy,
+	platform: NodeJS.Platform = process.platform,
+): Promise<PreparedBash> {
 	if (command.includes("\0")) throw new Error("command contains a NUL byte");
-	const deletePaths = parseDelete(command, policy.memoryDir);
+	const deletePaths = parseDelete(command, policy.memoryDir, platform);
 	if (deletePaths) return { kind: "delete", ...deletePaths };
 
-	const decision = classifyReadOnlyBash(command, { platform: process.platform });
+	const decision = classifyReadOnlyBash(command, { platform });
 	if (!decision.readOnly) throw new Error(decision.reason);
 	return {
 		kind: "execute",

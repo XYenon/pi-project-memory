@@ -1,17 +1,21 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, win32 } from "node:path";
 import test, { after, before } from "node:test";
 import { promisify } from "node:util";
 import {
+	assertContainedMarkdown,
 	containsVcsMetadataSegment,
 	initializeProjectPaths,
+	isContainedPath,
+	isMarkdownPath,
+	normalizePathInput,
 	resolveProjectPaths,
 	sanitizeProjectKey,
 } from "../src/paths.ts";
-import { createTempDirectory, shellPath } from "./helpers.ts";
+import { createTempDirectory, removeTempDirectory, shellPath, skipOnWindows } from "./helpers.ts";
 
 const execFileAsync = promisify(execFile);
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -25,7 +29,7 @@ before(async () => {
 after(async () => {
 	if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
-	await rm(isolatedAgentDir, { recursive: true, force: true });
+	await removeTempDirectory(isolatedAgentDir);
 });
 
 test("VCS metadata detection uses exact path segments", () => {
@@ -72,15 +76,19 @@ test("default and explicitly equivalent memory roots share coordination paths", 
 	await initializeProjectPaths(defaults);
 	const explicitAfterCreation = await resolveProjectPaths(project, defaults.memoryDir);
 	const alias = join(root, "memory-alias");
-	await symlink(defaults.memoryDir, alias);
-	const throughAlias = await resolveProjectPaths(project, alias);
-	for (const paths of [explicitBeforeCreation, explicitAfterCreation, throughAlias]) {
+	await symlink(defaults.memoryDir, alias, process.platform === "win32" ? "junction" : "dir");
+	const equivalent = [explicitBeforeCreation, explicitAfterCreation];
+	if (process.platform === "win32") {
+		await assert.rejects(resolveProjectPaths(project, alias), /Memory root must not be a symlink or junction/);
+	} else equivalent.push(await resolveProjectPaths(project, alias));
+	for (const paths of equivalent) {
 		assert.equal(paths.locksDir, defaults.locksDir);
 		assert.equal(paths.dreamStateFile, defaults.dreamStateFile);
 	}
 });
 
 test("custom roots isolate state and share locks by canonical memory namespace", async (t) => {
+	if (skipOnWindows(t, "unprivileged directory symlinks fall back to file links, so realpath fails")) return;
 	const root = await createTempDirectory(t, "pi-memory-custom-root-");
 	const [projectOne, projectTwo] = [join(root, "one"), join(root, "two")];
 	await Promise.all([mkdir(projectOne), mkdir(projectTwo)]);
@@ -99,6 +107,7 @@ test("custom roots isolate state and share locks by canonical memory namespace",
 	await mkdir(shared);
 	const throughAlias = await resolveProjectPaths(projectTwo, alias);
 	assert.equal(first.locksDir, throughAlias.locksDir);
+	assert.equal(throughAlias.memoryDir, alias);
 });
 
 test("namespace reservation rejects a pre-existing symlink before writing a marker", async (t) => {
@@ -165,6 +174,7 @@ test("default namespaces do not collide when sanitized project keys do", async (
 });
 
 test("linked worktrees use the common checkout as the Claude-compatible root", async (t) => {
+	if (skipOnWindows(t, "the fake git executable is a POSIX shebang script run through /bin/sh")) return;
 	const root = await createTempDirectory(t, "pi-memory-worktree-");
 	const main = join(root, "main");
 	const linked = join(root, "linked");
@@ -201,6 +211,7 @@ test("linked worktrees use the common checkout as the Claude-compatible root", a
 });
 
 test("project path initialization keeps existing permissions and accepts a symlink memory root", async (t) => {
+	if (skipOnWindows(t, "Windows does not preserve POSIX mode bits such as 0o777")) return;
 	const root = await createTempDirectory(t, "pi-memory-symlink-root-");
 	const target = join(root, "target");
 	const memoryDir = join(root, "memory");
@@ -233,4 +244,102 @@ test("project path initialization keeps existing permissions and accepts a symli
 	});
 	await writeFile(join(memoryDir, "fact.md"), "linked memory");
 	assert.equal(await readFile(join(target, "fact.md"), "utf8"), "linked memory");
+});
+
+test("normalizePathInput maps every accepted Windows form to one canonical drive path", () => {
+	const root = "C:\\pi-windows-path-fixture\\memory";
+	const cases: [string, string][] = [
+		["C:\\pi-windows-path-fixture\\memory\\a.md", `${root}\\a.md`],
+		["C:/pi-windows-path-fixture/memory/a.md", `${root}\\a.md`],
+		["/c/pi-windows-path-fixture/memory/a.md", `${root}\\a.md`],
+		["/d/pi-windows-path-fixture/memory/a.md", "D:\\pi-windows-path-fixture\\memory\\a.md"],
+		["/mnt/c/pi-windows-path-fixture/memory/a.md", `${root}\\a.md`],
+		["/cygdrive/c/pi-windows-path-fixture/memory/a.md", `${root}\\a.md`],
+		["\\\\?\\C:\\pi-windows-path-fixture\\memory\\a.md", `${root}\\a.md`],
+		["\\\\?\\UNC\\server\\share\\a.md", "\\\\server\\share\\a.md"],
+		["%USERPROFILE%\\a.md", "D:\\project\\%USERPROFILE%\\a.md"],
+		[" topic.md", "D:\\project\\ topic.md"],
+	];
+	for (const [input, expected] of cases)
+		assert.equal(normalizePathInput("D:\\project", input, "win32"), expected, input);
+	for (const input of ["~/pi-windows-path-fixture/a.md", "~\\pi-windows-path-fixture\\a.md"]) {
+		const expected = win32.resolve("D:\\project", homedir(), "pi-windows-path-fixture", "a.md");
+		assert.equal(normalizePathInput("D:\\project", input, "win32"), expected, input);
+	}
+	assert.equal(normalizePathInput("D:\\project", "~", "win32"), normalizePathInput("D:\\project", homedir(), "win32"));
+});
+
+test("normalizePathInput rejects drive-relative and stream operands", () => {
+	for (const [input, message] of [
+		["C:pi-windows-path-fixture\\a.md", /drive-relative/i],
+		["C:", /drive-relative/i],
+		["C:\\mem\\notes.md:stream.md", /data streams/i],
+		["C:\\mem\\a.md::$DATA", /data streams/i],
+	] as const)
+		assert.throws(() => normalizePathInput("C:\\project", input, "win32"), message, input);
+});
+
+test("normalizePathInput is a no-op for canonical POSIX paths", () => {
+	for (const path of ["/tmp/memory/a.md", "/tmp/memory", "/"])
+		assert.equal(normalizePathInput("/tmp/memory", path, "linux"), path);
+	assert.equal(normalizePathInput("/tmp/memory", "topics/a.md", "linux"), "/tmp/memory/topics/a.md");
+	assert.equal(normalizePathInput("/tmp/memory", "a.md", "linux"), "/tmp/memory/a.md");
+});
+
+test("isContainedPath case-folds Windows paths and rejects sibling prefixes", () => {
+	assert.equal(isContainedPath("C:\\memory", "c:\\MEMORY\\topics\\a.md", "win32"), true);
+	assert.equal(isContainedPath("C:\\memory", "C:/memory/topics/a.md", "win32"), true);
+	assert.equal(isContainedPath("C:\\memory", "C:\\memory", "win32"), true);
+	assert.equal(isContainedPath("C:\\memory", "C:\\memory-evil\\a.md", "win32"), false);
+	assert.equal(isContainedPath("C:\\memory", "D:\\memory\\a.md", "win32"), false);
+	assert.equal(isContainedPath("/memory", "/memory/topics/a.md", "linux"), true);
+	assert.equal(isContainedPath("/memory", "/memory-evil/a.md", "linux"), false);
+	// The comparison stays lexical; write and delete callers resolve links with
+	// realpath before consulting it, while reads may follow links like Claude.
+	assert.equal(isContainedPath("C:\\memory", "C:\\memory\\link\\secret.md", "win32"), true);
+});
+
+test("assertContainedMarkdown preserves platform casing rules and rejects ADS", () => {
+	assert.equal(assertContainedMarkdown(process.cwd(), "topic.md"), join(process.cwd(), "topic.md"));
+	assert.throws(() => assertContainedMarkdown(join(process.cwd(), "memory"), "topic.md"), /escapes/);
+	assert.equal(assertContainedMarkdown("C:\\memory", "C:\\memory\\FOO.MD", "win32"), "C:\\memory\\FOO.MD");
+	assert.equal(assertContainedMarkdown("/memory", "/memory/topic.md", "linux"), "/memory/topic.md");
+	assert.throws(() => assertContainedMarkdown("/memory", "/memory/FOO.MD", "linux"), /lowercase \.md/);
+	assert.throws(() => assertContainedMarkdown("C:\\memory", "C:\\memory\\notes.md:stream.md", "win32"), /data streams/);
+	assert.throws(() => assertContainedMarkdown("C:\\memory", "C:\\memory-evil\\a.md", "win32"), /escapes/);
+});
+
+test("isMarkdownPath is case-sensitive on POSIX and case-insensitive on Windows", () => {
+	assert.equal(isMarkdownPath("FOO.MD", "win32"), true);
+	assert.equal(isMarkdownPath("MEMORY.MD", "win32"), true);
+	assert.equal(isMarkdownPath("FOO.MD", "linux"), false);
+	assert.equal(isMarkdownPath("foo.md", "linux"), true);
+	assert.equal(isMarkdownPath("foo.md.txt"), false);
+});
+
+test("Windows rejects a default memory root junction before canonicalizing it", async (t) => {
+	if (process.platform !== "win32") return t.skip("Windows junction policy");
+	const root = await createTempDirectory(t, "pi-memory-root-junction-");
+	const target = join(root, "target");
+	await mkdir(target);
+	const paths = await resolveProjectPaths(root);
+	await symlink(target, paths.memoryDir, "junction");
+	await assert.rejects(resolveProjectPaths(root), /Memory root must not be a symlink or junction/);
+	await assert.rejects(initializeProjectPaths(paths), /Memory root must not be a symlink or junction/);
+});
+
+test("a project alias reuses its existing canonical namespace and memory", async (t) => {
+	const root = await createTempDirectory(t, "pi-memory-alias-namespace-");
+	const project = join(root, "project");
+	const alias = join(root, "project-alias");
+	await mkdir(project);
+	await symlink(project, alias, process.platform === "win32" ? "junction" : "dir");
+	const original = await resolveProjectPaths(project);
+	await initializeProjectPaths(original);
+	await writeFile(join(original.memoryDir, "fact.md"), "existing memory\n");
+	const linked = await resolveProjectPaths(alias);
+	assert.deepEqual(linked, original);
+	assert.equal(await readFile(join(linked.memoryDir, "fact.md"), "utf8"), "existing memory\n");
+	// Remove the junction before the recursive temp-directory teardown.
+	await rm(alias, { force: true });
 });

@@ -6,11 +6,140 @@ import { join, relative } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { createChildTools } from "../src/child-tools.ts";
-import { createToolWorkspace } from "./helpers.ts";
+import { normalizePathInput } from "../src/paths.ts";
+import { dreamPrompt } from "../src/prompts.ts";
+import { probeShell } from "../src/shell.ts";
+import { createToolWorkspace, skipOnWindows } from "./helpers.ts";
 
 function toolMap(tools: ReturnType<typeof createChildTools>) {
 	return new Map(tools.map((tool) => [tool.name, tool]));
 }
+
+test("background bash executes with the default shell probe", async (t) => {
+	const { root, memoryDir, projectRoot, locksDir } = await createToolWorkspace(t, "pi-memory-probed-shell-");
+	const shell = await probeShell();
+	if (!shell.available && !process.env.CI) return t.skip("Git Bash is unavailable");
+	assert.equal(shell.available, true, "CI must exercise the extension's Git Bash probe and execution together");
+	const tools = toolMap(
+		createChildTools({
+			mode: "extractor",
+			memoryDir,
+			projectRoot,
+			cwd: projectRoot,
+			scratchDir: root,
+			locksDir,
+			isCurrentGeneration: () => true,
+			touchedPaths: new Set(),
+			shell,
+		}),
+	);
+	const result = await tools.get("bash")!.execute("probed-shell", { command: "printf 'probed shell works'" });
+	assert.notEqual(result.isError, true, JSON.stringify(result));
+	assert.deepEqual(result.content, [{ type: "text", text: "probed shell works" }]);
+});
+
+test("Windows Dream transcript search executes the generated Bash example with quoted paths", async (t) => {
+	if (process.platform !== "win32") return t.skip("Requires Windows paths and Git Bash");
+	const env = await createToolWorkspace(t, "pi-memory-dream-command-");
+	const sessionDir = join(env.root, "Alice's sessions $HOME");
+	await mkdir(sessionDir);
+	await writeFile(join(sessionDir, "session.jsonl"), "needle transcript\n");
+	await writeFile(join(sessionDir, "ignored.txt"), "needle ignored\n");
+	const shell = await probeShell();
+	assert.equal(shell.available, true, "Git Bash is required for the Windows Dream integration test");
+	const tools = toolMap(
+		createChildTools({
+			...env,
+			mode: "dream",
+			cwd: env.projectRoot,
+			scratchDir: env.root,
+			sessionDir,
+			shell,
+			isCurrentGeneration: () => true,
+			touchedPaths: new Set(),
+		}),
+	);
+	const prompt = dreamPrompt({ memoryDir: env.memoryDir } as never, sessionDir, ["session"]);
+	const command = prompt.match(/`(grep -rn [^\n]+)`/)?.[1];
+	assert.ok(command, "Dream must include a Bash transcript search example");
+	const result = await tools.get("bash")!.execute("dream-search", {
+		command: command.replace("<narrow term>", "needle"),
+	});
+	assert.notEqual(result.isError, true, JSON.stringify(result));
+	const output = JSON.stringify(result.content);
+	assert.match(output, /session\.jsonl:1:needle transcript/);
+	assert.doesNotMatch(output, /needle ignored|No such file/);
+});
+
+test("Windows path forms reach the same file through read, edit, write, and bash rm", async (t) => {
+	if (process.platform !== "win32") return t.skip("Requires the Windows filesystem and native tools");
+	const env = await createToolWorkspace(t, "pi-memory-path-tools-");
+	const shell = await probeShell();
+	assert.equal(shell.available, true, "Git Bash is required for the Windows path integration test");
+	const memoryDir = await realpath(env.memoryDir);
+	const file = join(memoryDir, "topic name.MD");
+	const forward = file.replaceAll("\\", "/");
+	const drive = forward[0]!.toLowerCase();
+	const tail = forward.slice(2);
+	const alias = join(env.root, "memory-alias");
+	await symlink(memoryDir, alias, "junction");
+	const tools = toolMap(
+		createChildTools({
+			...env,
+			memoryDir,
+			mode: "extractor",
+			cwd: env.projectRoot,
+			scratchDir: env.root,
+			isCurrentGeneration: () => true,
+			touchedPaths: new Set(),
+			shell,
+		}),
+	);
+	for (const path of [
+		file,
+		forward,
+		`/${drive}${tail}`,
+		`/cygdrive/${drive}${tail}`,
+		`/mnt/${drive}${tail}`,
+		`\\\\?\\${file}`,
+		`~/${relative(homedir(), file).replaceAll("\\", "/")}`,
+		join(alias, "topic name.MD"),
+	]) {
+		await writeFile(file, "old fact\n");
+		assert.equal((await tools.get("read")!.execute("read", { path })).structuredContent, "old fact\n", path);
+		const edit = await tools.get("edit")!.execute("edit", { path, edits: [{ oldText: "old", newText: "new" }] });
+		assert.notEqual(edit.isError, true, JSON.stringify(edit));
+		assert.equal(await readFile(file, "utf8"), "new fact\n");
+		const write = await tools.get("write")!.execute("write", { path, content: "replacement\n" });
+		assert.notEqual(write.isError, true, JSON.stringify(write));
+		assert.equal(await readFile(file, "utf8"), "replacement\n");
+		if (path === forward) {
+			const cat = await tools.get("bash")!.execute("cat", { command: `cat '${forward}'` });
+			assert.notEqual(cat.isError, true, JSON.stringify(cat));
+			assert.deepEqual(cat.content, [{ type: "text", text: "replacement\n" }]);
+		}
+		const remove = await tools.get("bash")!.execute("rm", { command: `rm '${path}'` });
+		assert.notEqual(remove.isError, true, JSON.stringify(remove));
+		await assert.rejects(readFile(file), { code: "ENOENT" });
+	}
+	const newPath = join(alias, "new-directory", "new.md");
+	const create = await tools.get("write")!.execute("create", { path: newPath, content: "new fact\n" });
+	assert.notEqual(create.isError, true, JSON.stringify(create));
+	assert.equal(await readFile(join(memoryDir, "new-directory", "new.md"), "utf8"), "new fact\n");
+	const linkPath = join(alias, "leaf-link.md");
+	await symlink(newPath, linkPath);
+	const removeLink = await tools.get("bash")!.execute("rm-link", { command: `rm '${linkPath}'` });
+	assert.notEqual(removeLink.isError, true, JSON.stringify(removeLink));
+	await assert.rejects(readFile(linkPath), { code: "ENOENT" });
+	assert.equal(await readFile(newPath, "utf8"), "new fact\n");
+	await mkdir(join(memoryDir, "agents"));
+	await writeFile(join(memoryDir, "agents", "keep.md"), "protected\n");
+	const removeProtected = await tools.get("bash")!.execute("rm-protected", {
+		command: `rm '${join(alias, "agents", "keep.md")}'`,
+	});
+	assert.equal(removeProtected.isError, true);
+	assert.equal(await readFile(join(memoryDir, "agents", "keep.md"), "utf8"), "protected\n");
+});
 
 test("child tools normalize native Pi shorthand before read and mutation checks", async (t) => {
 	const { memoryDir, projectRoot, locksDir } = await createToolWorkspace(t, "pi-memory-shorthand-");
@@ -116,6 +245,102 @@ test("background tools use Pi-native names and schemas", async (t) => {
 	]);
 });
 
+test("without Git Bash, native memory tools still search, read, edit, and write safely", async (t) => {
+	const { memoryDir, projectRoot, locksDir } = await createToolWorkspace(t, "pi-memory-no-bash-");
+	for (const shell of [
+		{ available: false as const, reason: "not-found" as const },
+		{
+			available: false as const,
+			reason: "rejected" as const,
+			path: "C:\\Windows\\System32\\bash.exe",
+			detail: "wsl" as const,
+		},
+	]) {
+		const tools = toolMap(
+			createChildTools({
+				mode: "extractor",
+				memoryDir,
+				projectRoot,
+				cwd: projectRoot,
+				locksDir,
+				isCurrentGeneration: () => true,
+				touchedPaths: new Set(),
+				shell,
+			}),
+		);
+		assert.deepEqual([...tools.keys()], ["read", "write", "edit", "find", "grep"]);
+		const topic = join(memoryDir, "fact.md");
+		const saved = join(memoryDir, "saved.md");
+		await writeFile(topic, "old fact\n");
+		const find = await tools.get("find")!.execute("find", { pattern: "*.md", path: memoryDir });
+		assert.notEqual(find.isError, true, JSON.stringify(find));
+		assert.match(JSON.stringify(find.content), /fact\.md/);
+		const grep = await tools.get("grep")!.execute("grep", { pattern: "old fact", path: memoryDir });
+		assert.notEqual(grep.isError, true, JSON.stringify(grep));
+		assert.match(JSON.stringify(grep.content), /old fact/);
+		assert.equal((await tools.get("read")!.execute("read", { path: topic })).structuredContent, "old fact\n");
+		const edit = await tools.get("edit")!.execute("edit", {
+			path: topic,
+			edits: [{ oldText: "old", newText: "new" }],
+		});
+		assert.notEqual(edit.isError, true, JSON.stringify(edit));
+		assert.equal(await readFile(topic, "utf8"), "new fact\n");
+		const write = await tools.get("write")!.execute("write", { path: saved, content: "saved fact\n" });
+		assert.notEqual(write.isError, true, JSON.stringify(write));
+		assert.equal(await readFile(saved, "utf8"), "saved fact\n");
+		const outside = join(projectRoot, "outside.md");
+		const denied = await tools.get("write")!.execute("outside", {
+			path: outside,
+			content: "forbidden",
+		});
+		assert.equal(denied.isError, true);
+		await assert.rejects(readFile(outside), { code: "ENOENT" });
+		await rm(saved);
+	}
+});
+
+test("bash is listed when a Git Bash is available", async (t) => {
+	const { memoryDir, projectRoot, locksDir } = await createToolWorkspace(t, "pi-memory-with-bash-");
+	const tools = createChildTools({
+		mode: "extractor",
+		memoryDir,
+		projectRoot,
+		cwd: projectRoot,
+		locksDir,
+		isCurrentGeneration: () => true,
+		touchedPaths: new Set(),
+		shell: { available: true, path: "C:\\Program Files\\Git\\bin\\bash.exe" },
+	});
+	assert.deepEqual(
+		tools.map((tool) => tool.name),
+		["read", "write", "edit", "find", "grep", "bash"],
+	);
+});
+
+test("a shell removed mid-run fails only individual bash calls", async (t) => {
+	const { root, memoryDir, projectRoot, locksDir } = await createToolWorkspace(t, "pi-memory-shell-removed-");
+	const scratchDir = join(root, "scratch");
+	await mkdir(scratchDir);
+	const file = join(memoryDir, "fact.md");
+	await writeFile(file, "fact\n");
+	const tools = toolMap(
+		createChildTools({
+			mode: "extractor",
+			memoryDir,
+			projectRoot,
+			cwd: projectRoot,
+			scratchDir,
+			locksDir,
+			isCurrentGeneration: () => true,
+			touchedPaths: new Set(),
+			shell: { available: true, path: join(root, "removed", "bash.exe") },
+		}),
+	);
+	const bash = await tools.get("bash")!.execute("bash", { command: "ls" });
+	assert.equal(bash.isError, true);
+	assert.equal((await tools.get("read")!.execute("read", { path: file })).structuredContent, "fact\n");
+});
+
 test("all background tools inherit the parent cwd for both roles", async (t) => {
 	const { root, memoryDir, projectRoot, locksDir } = await createToolWorkspace(t, "pi-memory-relative-tools-");
 	// A linked worktree can live outside the canonical checkout used for memory identity.
@@ -159,7 +384,8 @@ test("all background tools inherit the parent cwd for both roles", async (t) => 
 		}
 		const pwd = await tools.get("bash")!.execute("pwd", { command: "pwd" });
 		assert.notEqual(pwd.isError, true);
-		assert.equal(pwd.content[0]?.type === "text" && pwd.content[0].text.trim(), await realpath(cwd));
+		assert.equal(pwd.content[0]?.type, "text");
+		assert.equal(normalizePathInput(cwd, pwd.content[0].text.trim()), await realpath(cwd));
 		const bashRead = await tools.get("bash")!.execute("relative-read", { command: "cat fact.md" });
 		assert.notEqual(bashRead.isError, true);
 		assert.match(JSON.stringify(bashRead.content), /parent fact/);
@@ -370,6 +596,13 @@ test("native read, find, and grep can read outside the project and memory direct
 });
 
 test("restricted Pi-native Bash permits outside reads and denies writes", async (t) => {
+	if (
+		skipOnWindows(
+			t,
+			"POSIX-only Bash fixture: native backslash paths and xargs input do not behave the same under Git Bash",
+		)
+	)
+		return;
 	const { root, memoryDir, projectRoot, locksDir } = await createToolWorkspace(t, "pi-memory-native-bash-");
 	const scratchDir = join(root, "scratch");
 	await mkdir(scratchDir);
@@ -470,11 +703,11 @@ test("reads can follow symlinks while writes stay contained and rm needs no read
 	const target = join(memoryDir, "delete.md");
 	await writeFile(target, "delete me\n");
 	const bash = tools.get("bash")!;
-	assert.notEqual((await bash.execute("unread", { command: `rm --force ${target}` })).isError, true);
+	assert.notEqual((await bash.execute("unread", { command: `rm --force '${target}'` })).isError, true);
 	await writeFile(target, "read version\n");
 	await tools.get("read")!.execute("read", { path: target });
 	await writeFile(target, "changed\n");
-	assert.notEqual((await bash.execute("stale", { command: `rm -f -- ${target}` })).isError, true);
+	assert.notEqual((await bash.execute("stale", { command: `rm -f -- '${target}'` })).isError, true);
 	await assert.rejects(readFile(target), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 
 	for (const protectedName of ["agents", ".git"]) {
@@ -483,11 +716,12 @@ test("reads can follow symlinks while writes stay contained and rm needs no read
 		await mkdir(protectedDir);
 		await writeFile(protectedFile, "protected\n");
 		await tools.get("read")!.execute(`read-${protectedName}`, { path: protectedFile });
-		assert.equal((await bash.execute(`delete-${protectedName}`, { command: `rm ${protectedFile}` })).isError, true);
+		assert.equal((await bash.execute(`delete-${protectedName}`, { command: `rm '${protectedFile}'` })).isError, true);
 		assert.equal(await readFile(protectedFile, "utf8"), "protected\n");
 	}
 	assert.equal(
-		(await bash.execute("long-force", { command: `rm --force ${join(memoryDir, "agents", "protected.md")}` })).isError,
+		(await bash.execute("long-force", { command: `rm --force '${join(memoryDir, "agents", "protected.md")}'` }))
+			.isError,
 		true,
 	);
 });

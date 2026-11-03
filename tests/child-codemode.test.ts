@@ -8,6 +8,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ChildCodemodeOptions } from "../src/child-codemode.ts";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { runChildAgent } from "../src/models.ts";
+import { probeShell } from "../src/shell.ts";
 import { createToolWorkspace } from "./helpers.ts";
 
 async function workspace(t: TestContext) {
@@ -33,9 +34,16 @@ async function workspace(t: TestContext) {
 }
 
 for (const role of ["extractor", "dream"] as const) {
-	for (const mode of ["on", "only"] as const) {
-		test(`${role} codemode ${mode} uses only local tools and preserves baselines, store, and parent instructions`, async (t) => {
+	for (const [mode, hasBash] of [
+		["on", true],
+		["only", true],
+		["on", false],
+		["only", false],
+	] as const) {
+		test(`${role} codemode ${mode} with bash ${hasBash} preserves tools, baselines, store, and parent instructions`, async (t) => {
 			const { root, faux, ctx, paths } = await workspace(t);
+			const toolNames = ["edit", "find", "grep", "read", "write"];
+			if (hasBash) toolNames.unshift("bash");
 			const topic = join(paths.memoryDir, "fact.md");
 			const output = join(paths.memoryDir, "saved.md");
 			const outside = join(root, "outside.md");
@@ -43,14 +51,14 @@ for (const role of ["extractor", "dream"] as const) {
 			await writeFile(outside, "outside\n");
 			const script = `
 				const names = ALL_TOOLS.map(tool => tool.name).sort();
-				if (JSON.stringify(names) !== JSON.stringify(["bash", "edit", "find", "grep", "read", "write"])) throw Error("Unexpected tools");
+				if (JSON.stringify(names) !== JSON.stringify(${JSON.stringify(toolNames)})) throw Error("Unexpected tools");
 				if (typeof models !== "undefined") throw Error("Model access leaked");
 				if (load("secret") !== undefined) throw Error("Store leaked");
 				await tools.read({path: ${JSON.stringify(outside)}});
 				const denied = await Promise.allSettled([
 					tools.write({path: ${JSON.stringify(outside)}, content: "bad"}),
 					tools.edit({path: ${JSON.stringify(topic)}, edits: [{oldText: "old", newText: "bad"}]}),
-					tools.bash({command: "touch forbidden"})
+					Promise.resolve().then(() => tools.bash({command: "touch forbidden"}))
 				]);
 				if (denied.some(result => result.status !== "rejected")) throw Error("Policy bypassed");
 				await tools.read({path: ${JSON.stringify(topic)}});
@@ -65,7 +73,7 @@ for (const role of ["extractor", "dream"] as const) {
 					assert.match(request.systemPrompt ?? "", /Earlier tool inventories/);
 					assert.deepEqual(
 						request.tools?.map((tool) => tool.name).sort(),
-						mode === "only" ? ["codemode"] : ["bash", "codemode", "edit", "find", "grep", "read", "write"],
+						mode === "only" ? ["codemode"] : [...toolNames, "codemode"].sort(),
 					);
 					for (const tool of request.tools ?? [])
 						assert.ok(request.systemPrompt?.includes(`- ${tool.name}: ${tool.description}`));
@@ -94,6 +102,7 @@ for (const role of ["extractor", "dream"] as const) {
 				config: structuredClone(DEFAULT_CONFIG),
 				paths,
 				ctx,
+				shell: hasBash ? await probeShell() : { available: false as const, reason: "not-found" as const },
 				codemode: { mode } satisfies ChildCodemodeOptions,
 				isCurrentGeneration: () => true,
 			};
@@ -117,6 +126,47 @@ for (const role of ["extractor", "dream"] as const) {
 		});
 	}
 }
+
+test("background runs freeze their shell availability per run and expose the no-bash codemode text", async (t) => {
+	const { faux, ctx, paths } = await workspace(t);
+	const requested: Array<{ tools: string[]; systemPrompt: string }> = [];
+	const respond = (context: any) => {
+		requested.push({
+			tools: (context.tools ?? []).map((tool: { name: string }) => tool.name).sort(),
+			systemPrompt: context.systemPrompt ?? "",
+		});
+		return fauxAssistantMessage("done");
+	};
+	const options = {
+		role: "extractor" as const,
+		prompt: "save memories",
+		sourceMessages: [],
+		systemPrompt: "system",
+		config: structuredClone(DEFAULT_CONFIG),
+		paths,
+		ctx,
+		codemode: { mode: "on" as const },
+		isCurrentGeneration: () => true,
+	};
+
+	faux.setResponses([respond]);
+	await runChildAgent({
+		...options,
+		shell: { available: false, reason: "not-found" },
+	});
+	assert.deepEqual(requested[0]!.tools, ["codemode", "edit", "find", "grep", "read", "write"]);
+	assert.match(requested[0]!.systemPrompt, /Shell access is unavailable in this run/);
+	assert.doesNotMatch(requested[0]!.systemPrompt, /restricted bash/);
+
+	faux.setResponses([respond]);
+	await runChildAgent({
+		...options,
+		shell: { available: true, path: "C:\\Program Files\\Git\\bin\\bash.exe" },
+	});
+	assert.deepEqual(requested[1]!.tools, ["bash", "codemode", "edit", "find", "grep", "read", "write"]);
+	assert.match(requested[1]!.systemPrompt, /restricted bash/);
+	assert.doesNotMatch(requested[1]!.systemPrompt, /Shell access is unavailable/);
+});
 
 test("codemode output spill remains readable during the task and is cleaned up afterward", async (t) => {
 	const { faux, ctx, paths } = await workspace(t);

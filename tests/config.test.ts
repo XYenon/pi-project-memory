@@ -45,14 +45,27 @@ test("parseConfig uses Claude-compatible selector defaults and inherited mainten
 	assert.equal(parseConfig({ models: { dream: { thinkingLevel: "high" } } }).models.dream.thinkingLevel, "high");
 });
 
+test("parseConfig accepts a shellPath override and ignores shellCommandPrefix", () => {
+	assert.equal(parseConfig({}).shellPath, null);
+	const config = parseConfig({
+		shellPath: "  C:\\Program Files\\Git\\bin\\bash.exe  ",
+		shellCommandPrefix: "source ~/.bashrc",
+	} as never);
+	assert.equal(config.shellPath, "C:\\Program Files\\Git\\bin\\bash.exe");
+	assert.equal("shellCommandPrefix" in config, false);
+	assert.equal(parseConfig({ shellPath: "   " }).shellPath, null);
+});
+
 test("config.example.json stays identical to DEFAULT_CONFIG", async () => {
 	const example = JSON.parse(await readFile(new URL("../config.example.json", import.meta.url), "utf8"));
 	assert.deepEqual(example, DEFAULT_CONFIG);
 });
 
-test("package metadata declares the supported Unix platforms", async () => {
+test("package metadata declares the supported platforms", async () => {
 	const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-	assert.deepEqual(packageJson.os, ["darwin", "linux", "android"]);
+	assert.deepEqual(packageJson.os, ["darwin", "linux", "win32", "android"]);
+	assert.equal(packageJson.cpu, undefined);
+	assert.equal(packageJson.engines.node, ">=22.19.0");
 });
 
 test("parseConfig accepts large safe integers without field-specific maxima", () => {
