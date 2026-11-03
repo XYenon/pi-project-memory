@@ -217,7 +217,7 @@ async function ensureRealPrivateDirectory(path: string): Promise<void> {
 	const info = await lstat(path);
 	if (!info.isDirectory() || info.isSymbolicLink())
 		throw new Error(`Project memory namespace must be a real directory: ${path}`);
-	await chmod(path, 0o700);
+	if (process.platform !== "win32") await chmod(path, 0o700);
 }
 
 async function readProjectMarker(namespaceDir: string): Promise<string | undefined> {

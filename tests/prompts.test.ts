@@ -90,7 +90,9 @@ test("runtime prompts match the fixed Claude-derived fixtures after allowed subs
 	assert.equal(extractionPrompt(3, [], "/memory/root"), await fixture("extraction"));
 	assert.equal(
 		dreamPrompt({ memoryDir: "/memory/root" } as never, "/sessions/staged", ["session-a", "session-b"]),
-		await fixture("dream"),
+		process.platform === "win32"
+			? (await fixture("dream")).replace("/sessions/staged/ --include", "'/sessions/staged/' --include")
+			: await fixture("dream"),
 	);
 });
 

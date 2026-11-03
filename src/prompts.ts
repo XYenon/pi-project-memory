@@ -233,6 +233,8 @@ Apply the memory types, what-not-to-save criteria, and frontmatter format from t
 
 export function dreamPrompt(paths: ProjectPaths, sessionDir: string, sessionIds: string[], hasBash = true): string {
 	const sessions = sessionIds.map((id) => `- ${sanitizeMemoryText(id)}`).join("\n");
+	const searchPath =
+		process.platform === "win32" ? `'${sessionDir.replaceAll("\\", "/").replaceAll("'", "'\\''")}/'` : `${sessionDir}/`;
 	return `# Dream: Memory Consolidation
 
 You are performing a dream — a reflective pass over your memory files. Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.
@@ -257,7 +259,7 @@ Look for new information worth persisting. Sources in rough priority order:
 
 1. **Existing memories that drifted** — facts that contradict something you see in the codebase now
 2. **Transcript search** — if you need specific context (e.g., "what was the error message from yesterday's build failure?"), grep the JSONL transcripts for narrow terms:
-   ${hasBash ? `\`grep -rn "<narrow term>" ${sessionDir}/ --include="*.jsonl" | tail -50\`` : `use the grep tool with pattern "<narrow term>" and path ${sessionDir}, limited to *.jsonl files`}
+   ${hasBash ? `\`grep -rn "<narrow term>" ${searchPath} --include="*.jsonl" | tail -50\`` : `use the grep tool with pattern "<narrow term>" and path ${sessionDir}, limited to *.jsonl files`}
 
 Don't exhaustively read transcripts. Look only for things you already suspect matter.
 

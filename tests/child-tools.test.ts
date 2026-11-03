@@ -7,6 +7,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { createChildTools } from "../src/child-tools.ts";
 import { normalizePathInput } from "../src/paths.ts";
+import { dreamPrompt } from "../src/prompts.ts";
 import { probeShell } from "../src/shell.ts";
 import { createToolWorkspace, skipOnWindows } from "./helpers.ts";
 
@@ -35,6 +36,39 @@ test("background bash executes with the default shell probe", async (t) => {
 	const result = await tools.get("bash")!.execute("probed-shell", { command: "printf 'probed shell works'" });
 	assert.notEqual(result.isError, true, JSON.stringify(result));
 	assert.deepEqual(result.content, [{ type: "text", text: "probed shell works" }]);
+});
+
+test("Windows Dream transcript search executes the generated Bash example with quoted paths", async (t) => {
+	if (process.platform !== "win32") return t.skip("Requires Windows paths and Git Bash");
+	const env = await createToolWorkspace(t, "pi-memory-dream-command-");
+	const sessionDir = join(env.root, "Alice's sessions $HOME");
+	await mkdir(sessionDir);
+	await writeFile(join(sessionDir, "session.jsonl"), "needle transcript\n");
+	await writeFile(join(sessionDir, "ignored.txt"), "needle ignored\n");
+	const shell = await probeShell();
+	assert.equal(shell.available, true, "Git Bash is required for the Windows Dream integration test");
+	const tools = toolMap(
+		createChildTools({
+			...env,
+			mode: "dream",
+			cwd: env.projectRoot,
+			scratchDir: env.root,
+			sessionDir,
+			shell,
+			isCurrentGeneration: () => true,
+			touchedPaths: new Set(),
+		}),
+	);
+	const prompt = dreamPrompt({ memoryDir: env.memoryDir } as never, sessionDir, ["session"]);
+	const command = prompt.match(/`(grep -rn [^\n]+)`/)?.[1];
+	assert.ok(command, "Dream must include a Bash transcript search example");
+	const result = await tools.get("bash")!.execute("dream-search", {
+		command: command.replace("<narrow term>", "needle"),
+	});
+	assert.notEqual(result.isError, true, JSON.stringify(result));
+	const output = JSON.stringify(result.content);
+	assert.match(output, /session\.jsonl:1:needle transcript/);
+	assert.doesNotMatch(output, /needle ignored|No such file/);
 });
 
 test("Windows path forms reach the same file through read, edit, write, and bash rm", async (t) => {
