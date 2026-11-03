@@ -797,6 +797,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 			const loadPanelData = async (): Promise<MemoryPanelData> => {
 				if (runtime !== state || !ctx.isProjectTrusted())
 					throw new Error("Memory session changed. Close and reopen /memory.");
+				state.shell ??= await probeShell({ shellPath: state.config.shellPath });
 				const paths = state.paths;
 				const topics = paths ? await scanTopics(paths.memoryDir) : [];
 				return {
@@ -810,6 +811,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 					recallBudget: RECALL_BUDGET,
 					topics,
 					overview: [
+						shellStatusLine(state.shell),
 						...(state.config.enabled
 							? [
 									`Selector: ${state.prefetch && !state.prefetch.result && !state.prefetch.controller.signal.aborted ? "running" : "automatic"}`,

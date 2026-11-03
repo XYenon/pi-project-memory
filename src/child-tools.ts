@@ -148,7 +148,7 @@ async function memoryPathSet(memoryDir: string, baselines: ReadonlyMap<string, R
 		followSymbolicLinks: false,
 		dot: false,
 		unique: true,
-		caseSensitiveMatch: false,
+		caseSensitiveMatch: process.platform !== "win32",
 		ignore: VCS_METADATA_DIRECTORIES.map((directory) => `**/${directory}/**`),
 	});
 	for (const path of baselines.keys()) paths.push(relative(canonicalRoot, path).split(sep).join("/"));

@@ -84,9 +84,9 @@ export function resolveToolPath(cwd: string, input: string): string {
 	return normalizePathInput(cwd, input);
 }
 
-/** Markdown extensions compare case-insensitively on every platform. */
-export function isMarkdownPath(path: string): boolean {
-	return /\.md$/i.test(path);
+/** Windows accepts mixed-case extensions; POSIX keeps the lowercase contract. */
+export function isMarkdownPath(path: string, platform: NodeJS.Platform = process.platform): boolean {
+	return platform === "win32" ? /\.md$/i.test(path) : path.endsWith(".md");
 }
 
 /**
@@ -189,10 +189,9 @@ function configuredMemoryDirectory(value: string | null): string | null {
 	}
 	let normalized: string;
 	try {
-		normalized = (process.platform === "win32" ? normalizePathInput(homedir(), expanded) : normalize(expanded)).replace(
-			/[\\/]+$/,
-			"",
-		);
+		normalized = (
+			process.platform === "win32" ? normalizePathLexical(homedir(), expanded) : normalize(expanded)
+		).replace(/[\\/]+$/, "");
 	} catch {
 		// Invalid forms fall back to the project namespace rather than failing startup.
 		return null;
@@ -307,7 +306,10 @@ export async function resolveProjectPaths(
 	const projectBaseDir = join(projectsRoot, namespace);
 	const configured = configuredMemoryDirectory(autoMemoryDirectory);
 	let memoryDir = configured ?? join(projectBaseDir, "memory");
-	if (process.platform === "win32") memoryDir = await canonicalNamespacePath(memoryDir);
+	if (process.platform === "win32") {
+		await rejectReparseRoot(memoryDir);
+		memoryDir = await canonicalNamespacePath(memoryDir);
+	}
 	const memoryNamespace = namespaceHash(await canonicalNamespacePath(memoryDir));
 	// Project state remains isolated. Dream cadence and locks use the canonical
 	// memory root so projects mounting one store coordinate maintenance.
@@ -384,8 +386,18 @@ export function assertContainedMarkdown(
 	candidate: string,
 	platform: NodeJS.Platform = process.platform,
 ): string {
-	const absolute = normalizePathLexical(process.cwd(), candidate, platform);
+	let absolute = normalizePathLexical(process.cwd(), candidate, platform);
+	if (platform === "win32") {
+		// Resolve directory aliases, but keep the final link so rm deletes the link itself.
+		absolute = win32.join(
+			normalizePathInput(process.cwd(), win32.dirname(absolute), platform),
+			win32.basename(absolute),
+		);
+	}
 	if (!isContainedPath(root, absolute, platform)) throw new Error(`Path escapes the memory directory: ${candidate}`);
-	if (!isMarkdownPath(absolute)) throw new Error(`Memory writes and deletes require a .md path: ${candidate}`);
+	if (!isMarkdownPath(absolute, platform))
+		throw new Error(
+			`Memory writes and deletes require a ${platform === "win32" ? "" : "lowercase "}.md path: ${candidate}`,
+		);
 	return absolute;
 }

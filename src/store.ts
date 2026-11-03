@@ -82,14 +82,17 @@ export async function readRegularFileNoFollow(filePath: string): Promise<string>
 	}
 }
 
-/** The index name compares case-insensitively on every platform. */
-export function isIndexFilename(name: string): boolean {
-	return basename(name).toLowerCase() === INDEX_FILE.toLowerCase();
+/** Match the platform's index-name casing rules. */
+export function isIndexFilename(name: string, platform: NodeJS.Platform = process.platform): boolean {
+	const base = basename(name);
+	return platform === "win32" ? base.toLowerCase() === INDEX_FILE.toLowerCase() : base === INDEX_FILE;
 }
 
 /** Only the root index is reserved; a nested file with the same name stays a topic. */
 function isMemoryIndexPath(relativePath: string): boolean {
-	return relativePath.toLowerCase() === INDEX_FILE.toLowerCase();
+	return process.platform === "win32"
+		? relativePath.toLowerCase() === INDEX_FILE.toLowerCase()
+		: relativePath === INDEX_FILE;
 }
 
 function indexableFilename(filename: string): boolean {
@@ -100,7 +103,7 @@ function indexableFilename(filename: string): boolean {
 function indexEntry(topic: MemoryTopic): string | null {
 	const filename = topic.filename.split(sep).join("/");
 	if (!indexableFilename(filename)) return null;
-	const title = basename(filename).replace(/\.md$/i, "");
+	const title = process.platform === "win32" ? basename(filename).replace(/\.md$/i, "") : basename(filename, ".md");
 	const prefix = `- [${title}](${filename})`;
 	const description = topic.description.replace(/\s+/g, " ").trim();
 	const remaining = 150 - prefix.length - 3;
@@ -196,10 +199,10 @@ async function scanTopicsInternal(
 	const relativePaths = await fg("**/*.md", {
 		cwd: memoryDir,
 		onlyFiles: true,
-		followSymbolicLinks: true,
+		followSymbolicLinks: process.platform !== "win32",
 		dot: false,
 		unique: true,
-		caseSensitiveMatch: false,
+		caseSensitiveMatch: process.platform !== "win32",
 	});
 	const filenames = relativePaths.filter(
 		(path) =>
@@ -214,6 +217,7 @@ async function scanTopicsInternal(
 			filenames.slice(offset, offset + TOPIC_SCAN_CONCURRENCY).map(async (filename) => {
 				const filePath = resolve(memoryDir, filename);
 				if (!isContainedPath(memoryDir, filePath)) throw new Error("escaped memory path");
+				await rejectReparsePathAncestor(filePath);
 				const handle = await open(filePath, constants.O_RDONLY);
 				try {
 					const info = await handle.stat();
@@ -263,6 +267,7 @@ export async function scanTopics(memoryDir: string): Promise<MemoryTopic[]> {
 }
 
 export async function recallTopic(topic: MemoryTopic): Promise<RecallItem> {
+	await rejectReparsePathAncestor(topic.filePath);
 	const handle = await open(topic.filePath, constants.O_RDONLY);
 	try {
 		const info = await handle.stat();
@@ -883,7 +888,7 @@ export async function snapshotMarkdown(
 		cwd: memoryDir,
 		onlyFiles: true,
 		followSymbolicLinks: false,
-		caseSensitiveMatch: false,
+		caseSensitiveMatch: process.platform !== "win32",
 		ignore: VCS_METADATA_DIRECTORIES.map((directory) => `**/${directory}/**`),
 	})) {
 		const entry = await snapshotMarkdownFile(memoryDir, topic, previous.get(topic));
@@ -931,7 +936,9 @@ export async function safeDeleteMemoryFile(
 	const [canonicalRoot, canonicalParent] = await Promise.all([realpath(memoryDir), realpath(dirname(filePath))]);
 	const canonicalFile = join(canonicalParent, basename(filePath));
 	if (!isContainedPath(canonicalRoot, canonicalFile) || !isMarkdownPath(canonicalFile))
-		throw new Error("delete target is outside memory or is not a .md file");
+		throw new Error(
+			`delete target is outside memory or is not ${process.platform === "win32" ? "a .md file" : "lowercase .md"}`,
+		);
 	const release = lockFile ? await acquireLock(lockFile, 15 * 60_000) : undefined;
 	if (lockFile && !release) throw new Error(`Another memory writer is modifying ${canonicalFile}`);
 	try {

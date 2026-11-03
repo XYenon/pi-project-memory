@@ -107,11 +107,19 @@ test("rm normalizes every accepted Windows operand form before containment", asy
 	);
 });
 
-test("rm deletes an uppercase .MD topic on every platform", async (t) => {
+test("rm accepts uppercase .MD only on Windows", async (t) => {
 	const env = await createToolWorkspace(t, "pi-memory-rm-case-");
 	const path = join(env.memoryDir, "FOO.MD");
 	await writeFile(path, "uppercase topic\n");
 	const command = `rm '${path}'`;
+	if (process.platform !== "win32") {
+		await assert.rejects(
+			prepareRestrictedBash(command, { cwd: env.projectRoot, memoryDir: env.memoryDir }),
+			/lowercase \.md/,
+		);
+		await access(path);
+		return;
+	}
 	const bash = createChildTools({
 		...env,
 		mode: "extractor",

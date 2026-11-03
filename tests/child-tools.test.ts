@@ -47,6 +47,8 @@ test("Windows path forms reach the same file through read, edit, write, and bash
 	const forward = file.replaceAll("\\", "/");
 	const drive = forward[0]!.toLowerCase();
 	const tail = forward.slice(2);
+	const alias = join(env.root, "memory-alias");
+	await symlink(memoryDir, alias, "junction");
 	const tools = toolMap(
 		createChildTools({
 			...env,
@@ -67,6 +69,7 @@ test("Windows path forms reach the same file through read, edit, write, and bash
 		`/mnt/${drive}${tail}`,
 		`\\\\?\\${file}`,
 		`~/${relative(homedir(), file).replaceAll("\\", "/")}`,
+		join(alias, "topic name.MD"),
 	]) {
 		await writeFile(file, "old fact\n");
 		assert.equal((await tools.get("read")!.execute("read", { path })).structuredContent, "old fact\n", path);
@@ -85,6 +88,23 @@ test("Windows path forms reach the same file through read, edit, write, and bash
 		assert.notEqual(remove.isError, true, JSON.stringify(remove));
 		await assert.rejects(readFile(file), { code: "ENOENT" });
 	}
+	const newPath = join(alias, "new-directory", "new.md");
+	const create = await tools.get("write")!.execute("create", { path: newPath, content: "new fact\n" });
+	assert.notEqual(create.isError, true, JSON.stringify(create));
+	assert.equal(await readFile(join(memoryDir, "new-directory", "new.md"), "utf8"), "new fact\n");
+	const linkPath = join(alias, "leaf-link.md");
+	await symlink(newPath, linkPath);
+	const removeLink = await tools.get("bash")!.execute("rm-link", { command: `rm '${linkPath}'` });
+	assert.notEqual(removeLink.isError, true, JSON.stringify(removeLink));
+	await assert.rejects(readFile(linkPath), { code: "ENOENT" });
+	assert.equal(await readFile(newPath, "utf8"), "new fact\n");
+	await mkdir(join(memoryDir, "agents"));
+	await writeFile(join(memoryDir, "agents", "keep.md"), "protected\n");
+	const removeProtected = await tools.get("bash")!.execute("rm-protected", {
+		command: `rm '${join(alias, "agents", "keep.md")}'`,
+	});
+	assert.equal(removeProtected.isError, true);
+	assert.equal(await readFile(join(memoryDir, "agents", "keep.md"), "utf8"), "protected\n");
 });
 
 test("child tools normalize native Pi shorthand before read and mutation checks", async (t) => {

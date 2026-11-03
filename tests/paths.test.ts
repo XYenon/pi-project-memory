@@ -76,9 +76,12 @@ test("default and explicitly equivalent memory roots share coordination paths", 
 	await initializeProjectPaths(defaults);
 	const explicitAfterCreation = await resolveProjectPaths(project, defaults.memoryDir);
 	const alias = join(root, "memory-alias");
-	await symlink(defaults.memoryDir, alias);
-	const throughAlias = await resolveProjectPaths(project, alias);
-	for (const paths of [explicitBeforeCreation, explicitAfterCreation, throughAlias]) {
+	await symlink(defaults.memoryDir, alias, process.platform === "win32" ? "junction" : "dir");
+	const equivalent = [explicitBeforeCreation, explicitAfterCreation];
+	if (process.platform === "win32") {
+		await assert.rejects(resolveProjectPaths(project, alias), /Memory root must not be a symlink or junction/);
+	} else equivalent.push(await resolveProjectPaths(project, alias));
+	for (const paths of equivalent) {
 		assert.equal(paths.locksDir, defaults.locksDir);
 		assert.equal(paths.dreamStateFile, defaults.dreamStateFile);
 	}
@@ -296,21 +299,33 @@ test("isContainedPath case-folds Windows paths and rejects sibling prefixes", ()
 	assert.equal(isContainedPath("C:\\memory", "C:\\memory\\link\\secret.md", "win32"), true);
 });
 
-test("assertContainedMarkdown accepts FOO.MD on every platform and rejects ADS", () => {
-	assert.equal(assertContainedMarkdown(process.cwd(), "topic.MD"), join(process.cwd(), "topic.MD"));
-	assert.throws(() => assertContainedMarkdown(join(process.cwd(), "memory"), "topic.MD"), /escapes/);
+test("assertContainedMarkdown preserves platform casing rules and rejects ADS", () => {
+	assert.equal(assertContainedMarkdown(process.cwd(), "topic.md"), join(process.cwd(), "topic.md"));
+	assert.throws(() => assertContainedMarkdown(join(process.cwd(), "memory"), "topic.md"), /escapes/);
 	assert.equal(assertContainedMarkdown("C:\\memory", "C:\\memory\\FOO.MD", "win32"), "C:\\memory\\FOO.MD");
 	assert.equal(assertContainedMarkdown("/memory", "/memory/topic.md", "linux"), "/memory/topic.md");
-	assert.equal(assertContainedMarkdown("/memory", "/memory/FOO.MD", "linux"), "/memory/FOO.MD");
+	assert.throws(() => assertContainedMarkdown("/memory", "/memory/FOO.MD", "linux"), /lowercase \.md/);
 	assert.throws(() => assertContainedMarkdown("C:\\memory", "C:\\memory\\notes.md:stream.md", "win32"), /data streams/);
 	assert.throws(() => assertContainedMarkdown("C:\\memory", "C:\\memory-evil\\a.md", "win32"), /escapes/);
 });
 
-test("isMarkdownPath matches the index and topics case-insensitively", () => {
-	assert.equal(isMarkdownPath("FOO.MD"), true);
-	assert.equal(isMarkdownPath("MEMORY.MD"), true);
-	assert.equal(isMarkdownPath("foo.md"), true);
+test("isMarkdownPath is case-sensitive on POSIX and case-insensitive on Windows", () => {
+	assert.equal(isMarkdownPath("FOO.MD", "win32"), true);
+	assert.equal(isMarkdownPath("MEMORY.MD", "win32"), true);
+	assert.equal(isMarkdownPath("FOO.MD", "linux"), false);
+	assert.equal(isMarkdownPath("foo.md", "linux"), true);
 	assert.equal(isMarkdownPath("foo.md.txt"), false);
+});
+
+test("Windows rejects a default memory root junction before canonicalizing it", async (t) => {
+	if (process.platform !== "win32") return t.skip("Windows junction policy");
+	const root = await createTempDirectory(t, "pi-memory-root-junction-");
+	const target = join(root, "target");
+	await mkdir(target);
+	const paths = await resolveProjectPaths(root);
+	await symlink(target, paths.memoryDir, "junction");
+	await assert.rejects(resolveProjectPaths(root), /Memory root must not be a symlink or junction/);
+	await assert.rejects(initializeProjectPaths(paths), /Memory root must not be a symlink or junction/);
 });
 
 test("a project alias reuses its existing canonical namespace and memory", async (t) => {

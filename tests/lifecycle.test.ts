@@ -299,6 +299,41 @@ test("memory panel refreshes disabled configuration without initializing memory 
 	await assert.rejects(access(h.paths.memoryDir));
 });
 
+test("memory status panel probes shell availability and updates it after config reload", async (t) => {
+	for (const enabled of [true, false]) {
+		const config = { enabled, extraction: { enabled: false }, dream: { enabled: false } };
+		const h = await createLifecycleHarness(t, { config });
+		const shellPath = join(h.root, "missing-bash");
+		await writeFile(h.configFile, JSON.stringify({ ...config, shellPath }));
+		const status = (path: string, missing = true) =>
+			process.platform === "win32"
+				? `Git Bash: rejected (${path} ${missing ? "was not found" : "is not Git Bash"})`
+				: `Git Bash: ${path}`;
+		mockMemoryPanel(h.context, async (component) => {
+			const render = () => component.render(240).join("\n");
+			assert.match(render(), /\[Overview\]/);
+			assert.match(render(), process.platform === "win32" ? /Git Bash:/ : /Shell: Pi default/);
+			// Reload clears the cached probe and must update this same panel's overview.
+			for (let i = 0; i < (enabled ? 2 : 1); i++) component.handleInput?.("\u001b[B");
+			component.handleInput?.("\r");
+			await eventually(() => render().includes(status(shellPath)), "reload should probe the configured shell");
+			await writeFile(shellPath, "not an executable");
+			component.handleInput?.("\u001b[B");
+			component.handleInput?.("\r");
+			await eventually(() => render().includes("Panel refreshed."), "refresh should complete in the panel");
+			assert.ok(render().includes(status(shellPath)), "refresh should preserve the cached shell availability");
+			component.handleInput?.("\u001b[A");
+			component.handleInput?.("\r");
+			await eventually(() => render().includes("Reloaded"), "configuration should reload again");
+			assert.ok(render().includes(status(shellPath, false)), "reload should recheck shell availability");
+			component.handleInput?.("\u001b");
+		});
+		await h.extension.commands.get("memory")?.handler("status", h.context);
+		assert.equal(h.notices.length, 0, "shell status should be rendered in the panel");
+		if (!enabled) await assert.rejects(access(h.paths.memoryDir));
+	}
+});
+
 test("manual maintenance stays in one panel and reports completion there", async (t) => {
 	for (const action of ["extract", "dream"] as const) {
 		const h = await createLifecycleHarness(t, {

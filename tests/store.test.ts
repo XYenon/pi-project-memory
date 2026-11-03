@@ -640,20 +640,58 @@ test("locks honor live owners, expose ownership loss, and release by token", asy
 	await releaseRecovered();
 });
 
-test("isIndexFilename compares MEMORY.md case-insensitively", () => {
-	assert.equal(isIndexFilename("MEMORY.md"), true);
-	assert.equal(isIndexFilename("memory.md"), true);
-	assert.equal(isIndexFilename("nested/Memory.Md"), true);
+test("isIndexFilename preserves platform casing rules", () => {
+	assert.equal(isIndexFilename("MEMORY.md", "linux"), true);
+	assert.equal(isIndexFilename("memory.md", "linux"), false);
+	assert.equal(isIndexFilename("memory.md", "win32"), true);
+	assert.equal(isIndexFilename("nested/Memory.Md", "win32"), true);
 	assert.equal(isIndexFilename("other.md"), false);
 });
 
-test("scanTopics is case-insensitive and keeps the index out of the catalog", async (t) => {
+test("topic scans and snapshots preserve platform casing rules", async (t) => {
 	const root = await createTempDirectory(t, "pi-memory-case-scan-");
 	await writeFile(join(root, "memory.md"), "# index\n");
 	await writeFile(join(root, "FOO.MD"), "---\ndescription: Upper case topic\n---\nbody\n");
 	const topics = await scanTopics(root);
 	const filenames = topics.map((topic) => topic.filename).sort();
-	assert.deepEqual(filenames, ["FOO.MD"]);
-	assert.ok((await snapshotMarkdown(root)).has("FOO.MD"));
+	assert.deepEqual(filenames, process.platform === "win32" ? ["FOO.MD"] : ["memory.md"]);
+	assert.equal((await snapshotMarkdown(root)).has("FOO.MD"), process.platform === "win32");
 	if (process.platform === "win32") assert.equal(await readIndex(root), "# index");
+});
+
+test("topic scans and recall reject Windows junctions but preserve POSIX symlink reads", async (t) => {
+	const root = await createTempDirectory(t, "pi-memory-topic-junction-");
+	const memory = join(root, "memory");
+	const outside = join(root, "outside");
+	await Promise.all([mkdir(memory), mkdir(outside)]);
+	await writeFile(join(memory, "safe.md"), "local fact\n");
+	await writeFile(join(outside, "secret.md"), "outside secret\n");
+	const linked = join(memory, "linked");
+	await symlink(outside, linked, process.platform === "win32" ? "junction" : "dir");
+	const topics = await scanTopics(memory);
+	const secret = {
+		...topics.find((topic) => topic.filename === "safe.md")!,
+		filename: "linked/secret.md",
+		filePath: join(linked, "secret.md"),
+	};
+	if (process.platform === "win32") {
+		assert.deepEqual(
+			topics.map((topic) => topic.filename),
+			["safe.md"],
+		);
+		await assert.rejects(recallTopic(secret), /symlink or junction/);
+	} else {
+		assert.ok(topics.some((topic) => topic.filename === "linked/secret.md"));
+		assert.equal((await recallTopic(secret)).content, "outside secret\n");
+	}
+	// A topic may have been selected before its parent was replaced with a junction.
+	await rm(linked);
+	await mkdir(linked);
+	await writeFile(join(linked, "secret.md"), "local fact\n");
+	const selected = (await scanTopics(memory)).find((topic) => topic.filename === "linked/secret.md")!;
+	assert.ok(selected);
+	await rm(linked, { recursive: true });
+	await symlink(outside, linked, process.platform === "win32" ? "junction" : "dir");
+	if (process.platform === "win32") await assert.rejects(recallTopic(selected), /symlink or junction/);
+	else assert.equal((await recallTopic(selected)).content, "outside secret\n");
 });

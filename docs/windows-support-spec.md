@@ -2,7 +2,7 @@
 
 Status: reduced scope from the closed wayfinder tickets for [Windows support map](https://github.com/fktpp2022/pi-project-memory/issues/1), for review in [Consolidated Windows support spec review](https://github.com/fktpp2022/pi-project-memory/issues/12). The requirements below do not claim completed implementation or verification.
 
-Scope: basic native Windows support for `pi-project-memory` under Pi, with Git Bash optional for background work. Markdown extension and index-name comparisons are case-insensitive on every platform. Other macOS, Linux, and Termux behavior stays unchanged.
+Scope: basic native Windows support for `pi-project-memory` under Pi, with Git Bash optional for background work. macOS, Linux, and Termux behavior stays unchanged.
 
 ## 1. Supported matrix and install
 
@@ -75,7 +75,7 @@ Use shared Windows normalization and containment rules in `resolveToolPath`, `co
 
 Resolve Windows memory roots and existing containing paths with `realpath`. Containment uses case-insensitive Windows path comparisons and filesystem checks. Apply the same rules to read, write, edit, delete, teardown, and index exclusion.
 
-On every platform, `.md` and `MEMORY.md` comparisons are case-insensitive. Scanning uses a case-insensitive pattern and deduplicates by canonical path.
+On Windows, `.md` and `MEMORY.md` comparisons are case-insensitive. Scanning uses a case-insensitive pattern and deduplicates by canonical path. POSIX keeps case-sensitive comparisons and scanning.
 
 There is no fixed-drive restriction or PowerShell drive probe. Do not add hardcoded memory path, filename, or Bash working-directory length budgets. Filesystem and process errors report platform limits when encountered.
 
@@ -99,9 +99,9 @@ Existing lock ownership, stale-lock recovery, payload compatibility, and PID beh
 
 ### Reparse points and no-follow checks
 
-- Reject a Windows memory root that is itself a junction or symlink. POSIX continues to accept symlink memory roots.
+- Reject a Windows memory root that is itself a junction or symlink before resolving its canonical path. POSIX continues to accept symlink memory roots.
 - Snapshots use `followSymbolicLinks: false`. Storage reads reject Windows symlinks and junctions when scanning memory files.
-- Storage reads check Windows ancestors with `lstat` before opening each file. Native tool reads keep their existing behavior, and writes remain inside memory. Deleting a symlink removes the link itself.
+- Topic scans and recall check Windows ancestors with `lstat` before opening each file. Topic scans do not follow Windows directory links. Native tool reads keep their existing behavior, and writes remain inside memory. Mutation paths resolve directory aliases while preserving the final file entry, so deleting a symlink removes the link itself.
 - Retain POSIX `O_NOFOLLOW`. The Windows check before opening leaves a race window that POSIX `O_NOFOLLOW` closes for the final entry.
 
 ### Permissions
