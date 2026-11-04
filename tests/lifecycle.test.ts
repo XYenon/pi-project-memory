@@ -13,6 +13,8 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	type KeybindingsManager as ExtensionKeybindingsManager,
+	keyHint,
+	keyText,
 	type MessageRenderer,
 	SessionManager,
 	type Theme,
@@ -1736,8 +1738,11 @@ test("background updates report changed files and stale loaded memories", async 
 	};
 	const renderer = harness.extension.entryRenderers.get(entry.customType)!;
 	const theme = { fg: (_color: string, text: string) => text } as Theme;
-	assert.match(renderer(entry, { expanded: false }, theme)!.render(80).join("\n"), /Memory · Saved 1 topic/);
-	assert.match(renderer(entry, { expanded: true }, theme)!.render(80).join("\n"), /loaded.md/);
+	assert.match(
+		renderer(entry, { expanded: false, keyText, keyHint }, theme)!.render(80).join("\n"),
+		/Memory · Saved 1 topic/,
+	);
+	assert.match(renderer(entry, { expanded: true, keyText, keyHint }, theme)!.render(80).join("\n"), /loaded.md/);
 	assert.ok(!harness.notices.some((notice) => notice.message.startsWith("Project memory updated:")));
 	assert.equal(result.message.display, false, "the immediate entry already displayed this update");
 	assert.deepEqual(result.message.details.updates[0], {

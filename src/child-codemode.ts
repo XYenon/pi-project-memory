@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentState, AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	createCodemodeExtension,
 	type ExtensionAPI,
@@ -18,12 +18,12 @@ export interface ChildCodemodeOptions {
 
 /** Register Pi's public codemode factory against a private, task-local tool registry. */
 export function createChildCodemode(
-	tools: AgentTool[],
+	tools: AgentState["tools"],
 	options: ChildCodemodeOptions,
 	ctx: ExtensionContext,
 	executeTool: ExtensionToolContext["executeTool"],
 	scratchDir: string,
-): AgentTool[] {
+): AgentState["tools"] {
 	const sessionManager = SessionManager.inMemory(ctx.cwd);
 	let definition: ToolDefinition | undefined;
 	// The factory only registers its tool and reads metadata through these callbacks.
@@ -73,7 +73,7 @@ export function createChildCodemode(
 }
 
 export function backgroundToolPrompt(
-	tools: AgentTool[],
+	tools: AgentState["tools"],
 	codemode?: ChildCodemodeOptions,
 	hasBash = tools.some((tool) => tool.name === "bash"),
 ): string {
