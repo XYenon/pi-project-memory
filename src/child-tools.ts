@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, copyFile, lstat, mkdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentState, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
 	createBashTool,
 	createEditTool,
@@ -179,7 +179,7 @@ function toolSignal(parent: AbortSignal | undefined): { signal: AbortSignal; cle
 	};
 }
 
-export function createChildTools(env: ToolEnvironment): AgentTool[] {
+export function createChildTools(env: ToolEnvironment): AgentState["tools"] {
 	const baselines = new Map<string, ReadBaseline>();
 
 	async function commitMemory(

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { convertToLlm, type Theme } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, keyHint, keyText, type Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import { type MemoryMessageDetails, renderMemoryMessage } from "../src/memory-message.ts";
 
@@ -11,7 +11,7 @@ function message(customType: string, content: string, details?: MemoryMessageDet
 }
 
 function render(entry: ReturnType<typeof message>, expanded = false, width = 100): string {
-	const component = renderMemoryMessage(entry, { expanded, outputPad: 1 }, theme);
+	const component = renderMemoryMessage(entry, { expanded, outputPad: 1, keyText, keyHint }, theme);
 	assert.ok(component);
 	const lines = component.render(width);
 	for (const line of lines) assert.ok(visibleWidth(line) <= width);
@@ -94,7 +94,7 @@ function click(overrides: Partial<TuiMouseEvent> = {}): TuiMouseEvent {
 
 test("clicking the summary toggles details, survives rebuilds, and respects keyboard expansion", () => {
 	const entry = message("pi-project-memory-recall", "remember this", { files: ["a.md"] });
-	const component = () => renderMemoryMessage(entry, { expanded: false, outputPad: 1 }, theme)!;
+	const component = () => renderMemoryMessage(entry, { expanded: false, outputPad: 1, keyText, keyHint }, theme)!;
 	const first = component();
 	assert.doesNotMatch(first.render(100).join("\n"), /remember this/);
 	assert.equal(first.handleMouse?.(click({ type: "wheel", wheelDelta: 1 })), undefined);
