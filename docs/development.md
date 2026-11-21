@@ -31,11 +31,9 @@ pnpm check
 
 `pnpm check` is the full gate. It runs these steps in order:
 
-1. `biome check . --error-on-warnings` (checks the format and code rules for TypeScript and JSON)
-2. `markdownlint-cli2 "**/*.md"` (checks Markdown rules)
-3. `prettier --check "**/*.md"` (checks Markdown format)
-4. `pnpm typecheck` (runs the `tsc --noEmit` type check)
-5. `pnpm test` (runs `tests/*.test.ts` with the Node.js built-in test runner)
+1. `biome check . --error-on-warnings` (checks formatting and code rules for TypeScript, JSON, and Markdown)
+2. `pnpm typecheck` (runs the `tsc --noEmit` type check)
+3. `pnpm test` (runs `tests/*.test.ts` with the Node.js built-in test runner)
 
 To format or fix code automatically, run:
 
@@ -44,7 +42,7 @@ pnpm format
 pnpm lint:fix
 ```
 
-Note: The research documents under `docs/research/**` are bound by version evidence. When you change non-research documents, run `prettier --write` and `markdownlint-cli2` only on the target Markdown files. Do not change any file under `docs/research/`.
+Note: The research documents under `docs/research/**` are bound by version evidence. When you change non-research documents, run `biome format <file> --write` only on the target Markdown files. Do not change any file under `docs/research/`.
 
 ## Local manual loading and debugging
 

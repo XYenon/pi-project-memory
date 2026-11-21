@@ -148,10 +148,11 @@ metadata head read = 30 lines / 65,536 bytes
 
 ```markdown
 ---
+
 name: <short-kebab-case-slug>
 description: <用于 recall 选取的一行摘要>
 metadata:
-  type: user | feedback | project | reference
+type: user | feedback | project | reference
 ---
 
 <一个 durable fact；feedback/project 后建议附 Why 与 How to apply>

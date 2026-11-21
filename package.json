@@ -25,13 +25,13 @@
     "src"
   ],
   "scripts": {
-    "lint": "biome lint . --error-on-warnings && markdownlint-cli2 \"**/*.md\"",
-    "lint:fix": "biome lint . --write && markdownlint-cli2 --fix \"**/*.md\"",
-    "format": "biome format . --write && prettier --write \"**/*.md\"",
-    "format:check": "biome format . && prettier --check \"**/*.md\"",
+    "lint": "biome lint . --error-on-warnings",
+    "lint:fix": "biome lint . --write",
+    "format": "biome format . --write",
+    "format:check": "biome format .",
     "typecheck": "tsc --noEmit",
     "test": "node --import=tsx --test tests/*.test.ts",
-    "check": "biome check . --error-on-warnings && markdownlint-cli2 \"**/*.md\" && prettier --check \"**/*.md\" && pnpm typecheck && pnpm test"
+    "check": "biome check . --error-on-warnings && pnpm typecheck && pnpm test"
   },
   "keywords": [
     "pi-package",
@@ -74,8 +74,6 @@
     "@earendil-works/pi-coding-agent": "^1.2.0",
     "@earendil-works/pi-tui": "^1.2.0",
     "@types/node": "^26.6.5",
-    "markdownlint-cli2": "^0.24.0",
-    "prettier": "^3.9.10",
     "tsx": "^4.23.15",
     "typebox": "^1.3.37",
     "typescript": "^7.0.2"

@@ -31,11 +31,9 @@ pnpm check
 
 其中 `pnpm check` 是完整门禁命令，会依次执行：
 
-1. `biome check . --error-on-warnings`（检查 TypeScript 与 JSON 的格式和代码规范）
-2. `markdownlint-cli2 "**/*.md"`（检查 Markdown 规范）
-3. `prettier --check "**/*.md"`（检查 Markdown 格式）
-4. `pnpm typecheck`（运行 `tsc --noEmit` 类型检查）
-5. `pnpm test`（使用 Node.js 内置测试运行器执行 `tests/*.test.ts`）
+1. `biome check . --error-on-warnings`（检查 TypeScript、JSON 与 Markdown 的格式和代码规范）
+2. `pnpm typecheck`（运行 `tsc --noEmit` 类型检查）
+3. `pnpm test`（使用 Node.js 内置测试运行器执行 `tests/*.test.ts`）
 
 如需自动格式化或修复代码：
 
@@ -44,7 +42,7 @@ pnpm format
 pnpm lint:fix
 ```
 
-注意：`docs/research/**` 目录下的研究文档受版本证据约束，日常修改非研究文档时，请只对目标 Markdown 文件单独运行 `prettier --write` 与 `markdownlint-cli2`，不要改动 `docs/research/` 下的任何文件。
+注意：`docs/research/**` 目录下的研究文档受版本证据约束，日常修改非研究文档时，请只对目标 Markdown 文件单独运行 `biome format <file> --write`，不要改动 `docs/research/` 下的任何文件。
 
 ## 本地手动加载与调试
 
