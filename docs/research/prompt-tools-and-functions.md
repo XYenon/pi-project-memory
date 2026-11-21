@@ -24,41 +24,41 @@ Memory prompt 不是一个固定字符串，而是一组根据运行模式动态
 
 ```ts
 async function buildMemorySystemPrompt(model, options, storageV5) {
-  const enabled = autoMemoryEnabled() && !outsideWorkingDirReadBlocked();
-  if (enabled) await warmCanonicalWorkingCopyRoot();
+	const enabled = autoMemoryEnabled() && !outsideWorkingDirReadBlocked();
+	if (enabled) await warmCanonicalWorkingCopyRoot();
 
-  // 测试/托管环境可直接覆盖完整 memory guidance
-  if (enabled && env.CLAUDE_COWORK_MEMORY_GUIDELINES) {
-    ensureMemoryDir();
-    return "# auto memory\n" + env.CLAUDE_COWORK_MEMORY_GUIDELINES;
-  }
+	// 测试/托管环境可直接覆盖完整 memory guidance
+	if (enabled && env.CLAUDE_COWORK_MEMORY_GUIDELINES) {
+		ensureMemoryDir();
+		return "# auto memory\n" + env.CLAUDE_COWORK_MEMORY_GUIDELINES;
+	}
 
-  const configuredStores = parseMemoryStoresEnv();
-  const discoveredStores = shouldDiscoverOrgStores() ? getConnectedOrgStores() : [];
-  const loadedIndexes = enabled ? await fetchConfiguredPromptIndexes() : [];
+	const configuredStores = parseMemoryStoresEnv();
+	const discoveredStores = shouldDiscoverOrgStores() ? getConnectedOrgStores() : [];
+	const loadedIndexes = enabled ? await fetchConfiguredPromptIndexes() : [];
 
-  if (enabled && discoveredStores.length > 0) {
-    // shared store 使用 memory_* tools；personal memory 仍用文件工具
-    markSharedMemoryServedViaTools(true);
-    return buildToolStorePrompt(/* qs() */);
-  }
+	if (enabled && discoveredStores.length > 0) {
+		// shared store 使用 memory_* tools；personal memory 仍用文件工具
+		markSharedMemoryServedViaTools(true);
+		return buildToolStorePrompt(/* qs() */);
+	}
 
-  if (enabled && leanPrompt(model)) {
-    return buildLeanFilePrompt(/* ia() */);
-  }
+	if (enabled && leanPrompt(model)) {
+		return buildLeanFilePrompt(/* ia() */);
+	}
 
-  if (enabled && hasTeamStore()) {
-    return configuredStoresDefineTeamMounts
-      ? buildMountedTeamPrompt(/* ua() */)
-      : buildPrivateAndTeamPrompt(/* da() */);
-  }
+	if (enabled && hasTeamStore()) {
+		return configuredStoresDefineTeamMounts
+			? buildMountedTeamPrompt(/* ua() */)
+			: buildPrivateAndTeamPrompt(/* da() */);
+	}
 
-  if (enabled) {
-    return buildBasicFilePrompt(/* fo() */);
-  }
+	if (enabled) {
+		return buildBasicFilePrompt(/* fo() */);
+	}
 
-  emitMemoryDisabledTelemetry();
-  return null;
+	emitMemoryDisabledTelemetry();
+	return null;
 }
 ```
 
@@ -504,25 +504,25 @@ memory_write
 
 ```ts
 async function memoryList({ store, path_prefix, cursor }) {
-  if (store === undefined) {
-    enforceNotPausedAndWorkspaceTrusted();
-    return { outcome: "ok", stores: describeConnectedStores() };
-  }
+	if (store === undefined) {
+		enforceNotPausedAndWorkspaceTrusted();
+		return { outcome: "ok", stores: describeConnectedStores() };
+	}
 
-  const resolved = resolveStore(store, { write: false });
-  const prefix = validateAndNormalizePrefix(path_prefix);
-  const all = await resolved.backend.list(prefix);
+	const resolved = resolveStore(store, { write: false });
+	const prefix = validateAndNormalizePrefix(path_prefix);
+	const all = await resolved.backend.list(prefix);
 
-  const sorted = all.filter(isValidMemoryPath).sort((a, b) => a.path.localeCompare(b.path));
-  const afterCursor = cursor ? sorted.filter((x) => x.path > cursor) : sorted;
-  const entries = afterCursor.slice(0, 50);
+	const sorted = all.filter(isValidMemoryPath).sort((a, b) => a.path.localeCompare(b.path));
+	const afterCursor = cursor ? sorted.filter((x) => x.path > cursor) : sorted;
+	const entries = afterCursor.slice(0, 50);
 
-  return {
-    outcome: "ok",
-    store_kind: resolved.kind,
-    entries,
-    remaining: afterCursor.length - entries.length,
-  };
+	return {
+		outcome: "ok",
+		store_kind: resolved.kind,
+		entries,
+		remaining: afterCursor.length - entries.length,
+	};
 }
 ```
 
@@ -571,22 +571,22 @@ async function memoryList({ store, path_prefix, cursor }) {
 
 ```ts
 async function memoryRead({ store, path }) {
-  const resolved = resolveStore(store, { write: false });
-  const normalized = normalizeMemoryPath(path);
-  validatePath(normalized);
+	const resolved = resolveStore(store, { write: false });
+	const normalized = normalizeMemoryPath(path);
+	validatePath(normalized);
 
-  const doc = await resolved.backend.readByPath(normalized);
-  if (!doc) return { outcome: "not_found", path: normalized };
-  if (utf8Bytes(doc.content) > 102400) return { outcome: "refused", reason: "too_large" };
+	const doc = await resolved.backend.readByPath(normalized);
+	if (!doc) return { outcome: "not_found", path: normalized };
+	if (utf8Bytes(doc.content) > 102400) return { outcome: "refused", reason: "too_large" };
 
-  return {
-    outcome: "ok",
-    path: normalized,
-    store_kind: resolved.kind,
-    content: normalizeContent(doc.content),
-    updatedAt: doc.updatedAt,
-    version: sha256(canonicalize(doc.content)).slice(0, 12),
-  };
+	return {
+		outcome: "ok",
+		path: normalized,
+		store_kind: resolved.kind,
+		content: normalizeContent(doc.content),
+		updatedAt: doc.updatedAt,
+		version: sha256(canonicalize(doc.content)).slice(0, 12),
+	};
 }
 ```
 
@@ -642,50 +642,50 @@ Never write secrets or credentials.
 
 ```ts
 async function memoryWrite({ store, path, content, if_version }) {
-  const resolved = resolveStore(store, { write: true });
-  const normalizedPath = normalizeMemoryPath(path);
-  let normalizedContent = normalizeUtf8Content(content);
+	const resolved = resolveStore(store, { write: true });
+	const normalizedPath = normalizeMemoryPath(path);
+	let normalizedContent = normalizeUtf8Content(content);
 
-  validateAbsolutePath(normalizedPath);
-  rejectReservedOrUnsafeSegments(normalizedPath);
-  rejectEmptyOrOver100KB(normalizedContent);
-  rejectPotentialSecrets(normalizedContent);
-  rejectWritesToReadOnlyStore();
+	validateAbsolutePath(normalizedPath);
+	rejectReservedOrUnsafeSegments(normalizedPath);
+	rejectEmptyOrOver100KB(normalizedContent);
+	rejectPotentialSecrets(normalizedContent);
+	rejectWritesToReadOnlyStore();
 
-  const current = await resolved.backend.readByPath(normalizedPath);
-  const expected = parseIfVersion(if_version);
+	const current = await resolved.backend.readByPath(normalizedPath);
+	const expected = parseIfVersion(if_version);
 
-  if (expected.kind === "new") {
-    if (current !== null) return conflictWithCurrent("version_new_on_existing", current);
-    return backend.create(normalizedPath, normalizedContent, { precondition: "not_exists" });
-  }
+	if (expected.kind === "new") {
+		if (current !== null) return conflictWithCurrent("version_new_on_existing", current);
+		return backend.create(normalizedPath, normalizedContent, { precondition: "not_exists" });
+	}
 
-  if (expected.kind === "malformed") return conflict("bad_version", current);
+	if (expected.kind === "malformed") return conflict("bad_version", current);
 
-  if (current === null) return { outcome: "missing", reason: "not_found" };
+	if (current === null) return { outcome: "missing", reason: "not_found" };
 
-  const actual = version12(current.content);
-  if (actual !== expected.token) return conflictWithCurrent("stale_version", current);
+	const actual = version12(current.content);
+	if (actual !== expected.token) return conflictWithCurrent("stale_version", current);
 
-  try {
-    // backend CAS 使用当前 document sha256，而不是只靠短 token
-    await backend.update(current.id, normalizedContent, current.sha256);
-    return ok("updated", version12(normalizedContent));
-  } catch (ConcurrentWriteConflict) {
-    const reread = await backend.readByPath(normalizedPath);
-    if (!reread) return missing();
-    if (reread.sha256 !== current.sha256) return conflictWithCurrent("stale_version", reread);
+	try {
+		// backend CAS 使用当前 document sha256，而不是只靠短 token
+		await backend.update(current.id, normalizedContent, current.sha256);
+		return ok("updated", version12(normalizedContent));
+	} catch (ConcurrentWriteConflict) {
+		const reread = await backend.readByPath(normalizedPath);
+		if (!reread) return missing();
+		if (reread.sha256 !== current.sha256) return conflictWithCurrent("stale_version", reread);
 
-    // 第一次可能是 spurious conflict：再 CAS 一次
-    try {
-      await backend.update(reread.id, normalizedContent, reread.sha256);
-      return ok("updated", version12(normalizedContent));
-    } catch {
-      const latest = await backend.readByPath(normalizedPath);
-      if (latest?.sha256 === current.sha256) return failed("repeated_spurious_conflict");
-      return conflictWithCurrent("stale_version", latest);
-    }
-  }
+		// 第一次可能是 spurious conflict：再 CAS 一次
+		try {
+			await backend.update(reread.id, normalizedContent, reread.sha256);
+			return ok("updated", version12(normalizedContent));
+		} catch {
+			const latest = await backend.readByPath(normalizedPath);
+			if (latest?.sha256 === current.sha256) return failed("repeated_spurious_conflict");
+			return conflictWithCurrent("stale_version", latest);
+		}
+	}
 }
 ```
 
@@ -731,28 +731,28 @@ new Set(["memory_read", "memory_list", "memory_search"]);
 
 ```ts
 function resolveMemoryDirectory() {
-  if (CLAUDE_COWORK_MEMORY_PATH_OVERRIDE) return validateAndNormalize(override);
+	if (CLAUDE_COWORK_MEMORY_PATH_OVERRIDE) return validateAndNormalize(override);
 
-  const setting = firstDefined([
-    policySettings.autoMemoryDirectory,
-    flagSettings.autoMemoryDirectory,
-    localOrAllowedProjectSetting,
-    userSettings.autoMemoryDirectory,
-  ]);
-  if (setting) return validateAndNormalize(expandHome(setting));
+	const setting = firstDefined([
+		policySettings.autoMemoryDirectory,
+		flagSettings.autoMemoryDirectory,
+		localOrAllowedProjectSetting,
+		userSettings.autoMemoryDirectory,
+	]);
+	if (setting) return validateAndNormalize(expandHome(setting));
 
-  const project = currentProjectRoot();
-  if (project === null) return null;
+	const project = currentProjectRoot();
+	if (project === null) return null;
 
-  const base = canonicalWorkingCopyRoot(project) ?? gitRoot(project) ?? project;
-  const key = sanitizeProjectKey(base);
-  return join(homeOrRemoteRoot(), "projects", key, "memory") + sep;
+	const base = canonicalWorkingCopyRoot(project) ?? gitRoot(project) ?? project;
+	const key = sanitizeProjectKey(base);
+	return join(homeOrRemoteRoot(), "projects", key, "memory") + sep;
 }
 
 function sanitizeProjectKey(path) {
-  const replaced = path.replace(/[^a-zA-Z0-9]/g, "-");
-  if (replaced.length <= 200) return replaced;
-  return replaced.slice(0, 200) + "-" + base36Hash(path);
+	const replaced = path.replace(/[^a-zA-Z0-9]/g, "-");
+	if (replaced.length <= 200) return replaced;
+	return replaced.slice(0, 200) + "-" + base36Hash(path);
 }
 ```
 
@@ -760,17 +760,17 @@ function sanitizeProjectKey(path) {
 
 ```ts
 function truncateIndex(raw) {
-  const normalized = trimAndMeasure(raw);
-  if (normalized.lines <= 200 && normalized.utf8Bytes <= 25000) return normalized.text;
+	const normalized = trimAndMeasure(raw);
+	if (normalized.lines <= 200 && normalized.utf8Bytes <= 25000) return normalized.text;
 
-  let visible = normalized.lines > 200 ? normalized.text.split("\n").slice(0, 200).join("\n") : normalized.text;
+	let visible = normalized.lines > 200 ? normalized.text.split("\n").slice(0, 200).join("\n") : normalized.text;
 
-  if (visible.length > 25000) {
-    const newline = visible.lastIndexOf("\n", 25000);
-    visible = visible.slice(0, newline > 0 ? newline : 25000);
-  }
+	if (visible.length > 25000) {
+		const newline = visible.lastIndexOf("\n", 25000);
+		visible = visible.slice(0, newline > 0 ? newline : 25000);
+	}
 
-  return visible + "\n\n> WARNING: MEMORY.md was truncated ...";
+	return visible + "\n\n> WARNING: MEMORY.md was truncated ...";
 }
 ```
 
@@ -780,40 +780,40 @@ function truncateIndex(raw) {
 
 ```ts
 async function scanMemoryTopics(root, signal, storageV5, hardened = false) {
-  const files = await recursiveList(root, hardened);
-  const candidates = files
-    .filter((path) => path.endsWith(".md"))
-    .filter((path) => !isMemoryIndex(path))
-    .filter((path) => !isSkillsDirectory(path))
-    .filter((path) => teamMountIsKnown(path));
+	const files = await recursiveList(root, hardened);
+	const candidates = files
+		.filter((path) => path.endsWith(".md"))
+		.filter((path) => !isMemoryIndex(path))
+		.filter((path) => !isSkillsDirectory(path))
+		.filter((path) => teamMountIsKnown(path));
 
-  const settled = await Promise.allSettled(
-    candidates.map(async (rel) => {
-      const absolute = join(root, rel);
-      const handle = hardened ? await openNoFollow(absolute) : undefined;
-      if (hardened) verifyRegularSingleLinkAndStableInode(handle, absolute);
+	const settled = await Promise.allSettled(
+		candidates.map(async (rel) => {
+			const absolute = join(root, rel);
+			const handle = hardened ? await openNoFollow(absolute) : undefined;
+			if (hardened) verifyRegularSingleLinkAndStableInode(handle, absolute);
 
-      const head = await readHead(absolute, {
-        maxLines: 30,
-        maxBytes: 65536,
-        truncateOnByteLimit: true,
-      });
-      const { frontmatter, body } = parseFrontmatter(head.content);
+			const head = await readHead(absolute, {
+				maxLines: 30,
+				maxBytes: 65536,
+				truncateOnByteLimit: true,
+			});
+			const { frontmatter, body } = parseFrontmatter(head.content);
 
-      return {
-        filename: rel,
-        filePath: absolute,
-        mtimeMs: head.mtimeMs,
-        modifiedMs: parseDate(frontmatter.modified) ?? head.mtimeMs,
-        description: frontmatter.description ?? firstHeading(body),
-        type: normalizeMemoryType(frontmatter.metadata?.type),
-      };
-    }),
-  );
+			return {
+				filename: rel,
+				filePath: absolute,
+				mtimeMs: head.mtimeMs,
+				modifiedMs: parseDate(frontmatter.modified) ?? head.mtimeMs,
+				description: frontmatter.description ?? firstHeading(body),
+				type: normalizeMemoryType(frontmatter.metadata?.type),
+			};
+		}),
+	);
 
-  return fulfilled(settled)
-    .sort((a, b) => b.mtimeMs - a.mtimeMs)
-    .slice(0, 200);
+	return fulfilled(settled)
+		.sort((a, b) => b.mtimeMs - a.mtimeMs)
+		.slice(0, 200);
 }
 ```
 
@@ -821,15 +821,15 @@ async function scanMemoryTopics(root, signal, storageV5, hardened = false) {
 
 ```ts
 async function recallMemoryTopic(path) {
-  const result = await readHead(path, {
-    maxLines: 200,
-    maxBytes: 4096,
-    truncateOnByteLimit: true,
-  });
-  return {
-    content: result.content,
-    truncated: result.totalLines > 200 || result.truncatedByBytes,
-  };
+	const result = await readHead(path, {
+		maxLines: 200,
+		maxBytes: 4096,
+		truncateOnByteLimit: true,
+	});
+	return {
+		content: result.content,
+		truncated: result.totalLines > 200 || result.truncatedByBytes,
+	};
 }
 ```
 
@@ -837,11 +837,11 @@ async function recallMemoryTopic(path) {
 
 ```ts
 async function lintMemoryWrite(path, newContent) {
-  const visible = await recallMemoryTopic(path);
-  if (fileIsOverRecallCap(visible)) warn("write succeeded, but future recall only sees first 4096 bytes/200 lines");
-  if (looksLikeContinuationFile(path)) warn("do not chain foo-2.md; summarize or use a semantic one-fact name");
-  if (!frontmatter.description) warn("missing description makes recall selection unreliable");
-  if (description.length > 300) warn("shorten description to about 150 chars");
+	const visible = await recallMemoryTopic(path);
+	if (fileIsOverRecallCap(visible)) warn("write succeeded, but future recall only sees first 4096 bytes/200 lines");
+	if (looksLikeContinuationFile(path)) warn("do not chain foo-2.md; summarize or use a semantic one-fact name");
+	if (!frontmatter.description) warn("missing description makes recall selection unreliable");
+	if (description.length > 300) warn("shorten description to about 150 chars");
 }
 ```
 
@@ -849,47 +849,47 @@ async function lintMemoryWrite(path, newContent) {
 
 ```ts
 async function maybeExtractAtTurnEnd(context) {
-  if (isSubagent(context)) return;
-  if (!extractFeatureEnabled()) return;
-  if (!autoMemoryEnabled() || outsideReadPolicyBlocksMemory()) return;
-  if (remoteModeActive()) return;
+	if (isSubagent(context)) return;
+	if (!extractFeatureEnabled()) return;
+	if (!autoMemoryEnabled() || outsideReadPolicyBlocksMemory()) return;
+	if (remoteModeActive()) return;
 
-  if (conversationAlreadyWroteMemorySinceCursor()) {
-    moveCursorToEnd();
-    return;
-  }
-  if (!hasUserProseAtLeast3WordsSinceCursor()) {
-    moveCursorToEnd();
-    return;
-  }
-  if (!cadenceReached()) {
-    scheduleIdleFlush();
-    return;
-  }
-  if (permissionRuleWouldDenyOrAskForMemoryWrite()) return;
+	if (conversationAlreadyWroteMemorySinceCursor()) {
+		moveCursorToEnd();
+		return;
+	}
+	if (!hasUserProseAtLeast3WordsSinceCursor()) {
+		moveCursorToEnd();
+		return;
+	}
+	if (!cadenceReached()) {
+		scheduleIdleFlush();
+		return;
+	}
+	if (permissionRuleWouldDenyOrAskForMemoryWrite()) return;
 
-  if (extractorAlreadyRunning()) {
-    stashLatestContextForTrailingRun();
-    return;
-  }
+	if (extractorAlreadyRunning()) {
+		stashLatestContextForTrailingRun();
+		return;
+	}
 
-  const files = await scanMemoryTopics(memoryRoot);
-  // recentMessageCount = cursor 之后全部 user/assistant 消息数，不是固定 20。
-  const recentMessageCount = countUserAndAssistantMessagesSinceCursor();
-  const prompt = buildExtractionPrompt(recentMessageCount, files);
-  const result = await forkAgent({
-    prompt,
-    maxTurns: 5,
-    canUseTool: restrictedMemoryToolGate,
-    skipTranscript: true,
-  });
+	const files = await scanMemoryTopics(memoryRoot);
+	// recentMessageCount = cursor 之后全部 user/assistant 消息数，不是固定 20。
+	const recentMessageCount = countUserAndAssistantMessagesSinceCursor();
+	const prompt = buildExtractionPrompt(recentMessageCount, files);
+	const result = await forkAgent({
+		prompt,
+		maxTurns: 5,
+		canUseTool: restrictedMemoryToolGate,
+		skipTranscript: true,
+	});
 
-  const writtenPaths = successfulMemoryWrites(result.messages);
-  // 本地 file mode 在 fork 返回后前移，包括返回 API error 或达到 turn cap。
-  // fork 抛出异常则不会执行这里，不套用 MCP 的三次未完成阈值。
-  moveCursorToInputSnapshotEnd();
-  resyncReadFileState(writtenPaths);
-  enqueuePendingMemoryUpdate(writtenPaths);
+	const writtenPaths = successfulMemoryWrites(result.messages);
+	// 本地 file mode 在 fork 返回后前移，包括返回 API error 或达到 turn cap。
+	// fork 抛出异常则不会执行这里，不套用 MCP 的三次未完成阈值。
+	moveCursorToInputSnapshotEnd();
+	resyncReadFileState(writtenPaths);
+	enqueuePendingMemoryUpdate(writtenPaths);
 }
 ```
 
@@ -899,24 +899,24 @@ async function maybeExtractAtTurnEnd(context) {
 
 ```ts
 async function restrictedMemoryToolGate(tool, input, context) {
-  if (memoryPaused()) deny();
-  if (tool.isMcp) deny();
-  if (hookRequiresConfirmation()) deny();
+	if (memoryPaused()) deny();
+	if (tool.isMcp) deny();
+	if (hookRequiresConfirmation()) deny();
 
-  const ruleResult = evaluateNormalPermissionRulesFailClosed();
-  if (ruleResult === "deny" || ruleResult === "ask") deny();
+	const ruleResult = evaluateNormalPermissionRulesFailClosed();
+	if (ruleResult === "deny" || ruleResult === "ask") deny();
 
-  if (["Read", "Glob", "Grep"].includes(tool.name)) return allowOnlyIfWithinMemoryRootOrSafeRead();
+	if (["Read", "Glob", "Grep"].includes(tool.name)) return allowOnlyIfWithinMemoryRootOrSafeRead();
 
-  if (["Write", "Edit"].includes(tool.name)) return allowOnlyIfMarkdownInsideMemoryRoot();
+	if (["Write", "Edit"].includes(tool.name)) return allowOnlyIfMarkdownInsideMemoryRoot();
 
-  if (tool.name === "Bash") {
-    if (isReadOnlyShellCommand(input)) return allow();
-    if (isSimpleRmOfMarkdownInsideMemoryRoot(input)) return allow();
-    deny();
-  }
+	if (tool.name === "Bash") {
+		if (isReadOnlyShellCommand(input)) return allow();
+		if (isSimpleRmOfMarkdownInsideMemoryRoot(input)) return allow();
+		deny();
+	}
 
-  deny();
+	deny();
 }
 ```
 
@@ -924,43 +924,43 @@ async function restrictedMemoryToolGate(tool, input, context) {
 
 ```ts
 async function maybeDream(context) {
-  if (!serverFeatureAvailable()) return;
-  if (settings.autoDreamEnabled === false) return;
-  if (!autoMemoryEnabled() || outsideReadPolicyBlocksMemory()) return;
-  if (remoteModeActive()) return;
+	if (!serverFeatureAvailable()) return;
+	if (settings.autoDreamEnabled === false) return;
+	if (!autoMemoryEnabled() || outsideReadPolicyBlocksMemory()) return;
+	if (remoteModeActive()) return;
 
-  const last = await readConsolidationTimestamp();
-  if (hoursSince(last) < (flag.minHours ?? 24)) return;
-  if (timeSinceLastScan() < 10 * MINUTE) return;
+	const last = await readConsolidationTimestamp();
+	if (hoursSince(last) < (flag.minHours ?? 24)) return;
+	if (timeSinceLastScan() < 10 * MINUTE) return;
 
-  const sessions = (await listSessionsTouchedSince(last)).filter((id) => id !== currentSessionId);
-  if (sessions.length < (flag.minSessions ?? 5)) return;
+	const sessions = (await listSessionsTouchedSince(last)).filter((id) => id !== currentSessionId);
+	if (sessions.length < (flag.minSessions ?? 5)) return;
 
-  if (permissionRuleWouldDenyOrAskForMemoryWrite()) return;
-  // Acquire 同时记录本次尝试时间，并返回可用于回滚的旧时间。
-  const lock = await acquireConsolidationLock();
-  if (!lock) return;
+	if (permissionRuleWouldDenyOrAskForMemoryWrite()) return;
+	// Acquire 同时记录本次尝试时间，并返回可用于回滚的旧时间。
+	const lock = await acquireConsolidationLock();
+	if (!lock) return;
 
-  let phase = "fork";
-  const abortController = new AbortController();
-  try {
-    const prompt = buildDreamPrompt(memoryDir, sessionDir, sessions);
-    const result = await forkAgent({
-      prompt,
-      canUseTool: restrictedMemoryToolGate,
-      skipTranscript: true,
-      abortController,
-      // dream 未传 maxTurns，通用 fork runner 默认使用 50。
-    });
-    // 返回 API error 仍属于已返回的 fork，不回滚本次尝试时间。
-    phase = "completion";
-    notifyFilesTouched(result);
-  } catch (error) {
-    // 中止保留本次时间。Completion 阶段的通知错误也不回滚。
-    if (abortController.signal.aborted) return;
-    if (phase === "fork") await rollbackConsolidationTimestamp(lock.previousTimestamp);
-    reportDreamError(error);
-  }
+	let phase = "fork";
+	const abortController = new AbortController();
+	try {
+		const prompt = buildDreamPrompt(memoryDir, sessionDir, sessions);
+		const result = await forkAgent({
+			prompt,
+			canUseTool: restrictedMemoryToolGate,
+			skipTranscript: true,
+			abortController,
+			// dream 未传 maxTurns，通用 fork runner 默认使用 50。
+		});
+		// 返回 API error 仍属于已返回的 fork，不回滚本次尝试时间。
+		phase = "completion";
+		notifyFilesTouched(result);
+	} catch (error) {
+		// 中止保留本次时间。Completion 阶段的通知错误也不回滚。
+		if (abortController.signal.aborted) return;
+		if (phase === "fork") await rollbackConsolidationTimestamp(lock.previousTimestamp);
+		reportDreamError(error);
+	}
 }
 ```
 
@@ -970,32 +970,32 @@ async function maybeDream(context) {
 
 ```ts
 async function fetchAccountMemoryContext() {
-  const previousVersion = state.held?.version;
-  const response = await GET("/memory_context", {
-    timeout: 10_000,
-    headers: previousVersion ? { "If-None-Match": `"${previousVersion}"` } : {},
-  });
+	const previousVersion = state.held?.version;
+	const response = await GET("/memory_context", {
+		timeout: 10_000,
+		headers: previousVersion ? { "If-None-Match": `"${previousVersion}"` } : {},
+	});
 
-  switch (response.status) {
-    case 200:
-      state.held = validate({
-        version: response.version,
-        content: response.content, // <= 256KB
-        versions: response.versions, // path -> version
-        guidance: response.guidance, // <= 4096
-      });
-      break;
-    case 304:
-      // keep existing context
-      break;
-    case 204:
-      state.held = { version: parseETag(response), content: null };
-      break;
-    case 429:
-    case 503:
-      markNotBuilt();
-      break;
-  }
+	switch (response.status) {
+		case 200:
+			state.held = validate({
+				version: response.version,
+				content: response.content, // <= 256KB
+				versions: response.versions, // path -> version
+				guidance: response.guidance, // <= 4096
+			});
+			break;
+		case 304:
+			// keep existing context
+			break;
+		case 204:
+			state.held = { version: parseETag(response), content: null };
+			break;
+		case 429:
+		case 503:
+			markNotBuilt();
+			break;
+	}
 }
 ```
 
