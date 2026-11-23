@@ -95,13 +95,13 @@ pi install .
 
 ## Command reference
 
-| Command                       | Purpose                                                                                                                                                                                                     |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/memory` or `/memory status` | Opens the memory panel in the terminal. RPC and other modes retain the text status report.                                                                                                                  |
-| `/memory list`                | Opens Topics in the terminal, with search and preview. Other modes list topic types, paths, and descriptions as text.                                                                                       |
-| `/memory extract`             | Runs memory extraction once right away. It processes conversation that has not been extracted yet. You can run it by hand even when automatic extraction is off in the configuration.                       |
-| `/memory dream`               | Runs memory consolidation and merging once right away. It skips the time interval and session count conditions, but it still requires `dream.enabled` to be `true` in the configuration.                    |
-| `/memory reload-config`       | Reloads the user-level config file. Changes to the model, extraction, and consolidation settings take effect right away. A change to the `autoMemoryDirectory` path takes effect at the next session start. |
+| Command                       | Purpose                                                                                                                                                                                  |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/memory` or `/memory status` | Opens the memory panel in the terminal. RPC and other modes retain the text status report.                                                                                               |
+| `/memory list`                | Opens Topics in the terminal, with search and preview. Other modes list topic types, paths, and descriptions as text.                                                                    |
+| `/memory extract`             | Runs memory extraction once right away. It processes conversation that has not been extracted yet. You can run it by hand even when automatic extraction is off in the configuration.    |
+| `/memory dream`               | Runs memory consolidation and merging once right away. It skips the time interval and session count conditions, but it still requires `dream.enabled` to be `true` in the configuration. |
+| `/memory reload-config`       | Reloads user-level config. Models, extraction, and Dream update immediately; storage-root changes wait until the next session start.                                                     |
 
 Use Tab to switch views, type to search in Topics, and press Enter to preview. Escape goes back or closes the panel. Subcommands support completion.
 
@@ -120,10 +120,13 @@ mkdir -p ~/.pi/agent/project-memory
 cp config.example.json ~/.pi/agent/project-memory/config.json
 ```
 
+Unknown config fields are ignored.
+
 The most common settings are listed below:
 
 - `enabled`: The master switch for the extension (default `true`). When it is `false`, the extension is fully disabled. It does not create the memory directory and does not start any background model call.
 - `autoMemoryDirectory`: The directory where memory files are saved (default `null`). It accepts an absolute path or a path that starts with `~/`. You can set it only in the user-level config file. A file inside the project repository cannot override it.
+- `useProjectMemory` and `projectMemoryDirectory`: Set `useProjectMemory: true` to use `<project-root>/.pi/memory/`; set `projectMemoryDirectory: ".memory"` to use `.memory/memory/` and `.memory/memory-state/` instead. Root changes take effect next session and do not move files. This mode overrides `autoMemoryDirectory`.
 - `models.selector`, `models.extractor`, and `models.dream`: Each sets the model (`model`), thinking level (`thinkingLevel`), and maximum output length (`maxTokens`) for one of the three background tasks: selection, extraction, and consolidation.
 - `extraction`: Controls the automatic extraction switch (`enabled`), how many turns pass between extractions (`everyNTurns`, default `1`), and the number of idle seconds that trigger extraction (`idleFlushSeconds`, default `120`).
 - `dream`: Controls the periodic consolidation switch (`enabled`), the minimum number of hours between runs (`minimumHours`, default `24`), and the number of other sessions that must accumulate (`minimumOtherSessions`, default `5`).
@@ -193,7 +196,7 @@ Check that the `model` in `~/.pi/agent/project-memory/config.json` is `"inherit"
 
 ### Config changes have no effect
 
-After you save the config, run `/memory reload-config` or restart Pi. If you changed `autoMemoryDirectory`, you must start a new Pi session before the extension switches to the new directory. The extension does not move files from the old directory automatically.
+After you save the config, run `/memory reload-config` or restart Pi. If you changed `autoMemoryDirectory`, `useProjectMemory`, or `projectMemoryDirectory`, start a new Pi session before the extension switches directories. The extension does not move existing files automatically.
 
 ## Documentation
 

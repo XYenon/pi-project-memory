@@ -61,6 +61,122 @@ test("autoMemoryDirectory accepts safe paths and falls back for invalid override
 	}
 });
 
+test("local storage defaults to .pi and takes precedence over absolute overrides", async (t) => {
+	const root = await createTempDirectory(t, "pi-memory-local-default-");
+	const projectRoot = await realpath(root);
+	const paths = await resolveProjectPaths(root, join(root, "override"), true);
+	assert.equal(paths.memoryDir, join(projectRoot, ".pi", "memory"));
+	assert.equal(paths.baseDir, join(projectRoot, ".pi", "memory-state"));
+	assert.equal(paths.stateFile, join(paths.baseDir, "state.json"));
+	assert.deepEqual(await resolveProjectPaths(root, null, true, ".pi"), paths);
+});
+
+test("custom local containers select both roots without migrating existing memory or state", async (t) => {
+	const root = await createTempDirectory(t, "pi-memory-local-custom-");
+	const defaults = await resolveProjectPaths(root, null, true);
+	await initializeProjectPaths(defaults);
+	await writeFile(join(defaults.memoryDir, "fact.md"), "old memory\n");
+	await writeFile(defaults.stateFile, '{"schemaVersion":1,"lastDreamAt":123}\n');
+	const custom = await resolveProjectPaths(root, join(root, "ignored-override"), true, ".em");
+	assert.equal(custom.projectRoot, defaults.projectRoot);
+	assert.equal(custom.projectKey, defaults.projectKey);
+	assert.equal(custom.memoryDir, join(defaults.projectRoot, ".em", "memory"));
+	assert.equal(custom.baseDir, join(defaults.projectRoot, ".em", "memory-state"));
+	assert.equal(custom.stateFile, join(custom.baseDir, "state.json"));
+	assert.notEqual(custom.locksDir, defaults.locksDir);
+	assert.notEqual(custom.dreamStateFile, defaults.dreamStateFile);
+	assert.ok(custom.locksDir.startsWith(join(isolatedAgentDir, "project-memory", "memory-roots")));
+	await assert.rejects(stat(custom.baseDir), { code: "ENOENT" });
+	await assert.rejects(stat(custom.memoryDir), { code: "ENOENT" });
+	await initializeProjectPaths(custom);
+	assert.deepEqual(await resolveProjectPaths(root, null, true, ".em"), custom);
+	await assert.rejects(readFile(join(custom.memoryDir, "fact.md")), { code: "ENOENT" });
+	await assert.rejects(readFile(custom.stateFile), { code: "ENOENT" });
+	assert.equal(await readFile(join(defaults.memoryDir, "fact.md"), "utf8"), "old memory\n");
+	assert.equal(await readFile(defaults.stateFile, "utf8"), '{"schemaVersion":1,"lastDreamAt":123}\n');
+	assert.deepEqual(await resolveProjectPaths(root, null, true), defaults);
+});
+
+test("exported path API independently validates the local container", async (t) => {
+	const root = await createTempDirectory(t, "pi-memory-local-validation-");
+	const defaults = await resolveProjectPaths(root, null, true);
+	const reserved = [
+		"CON",
+		"PRN",
+		"AUX",
+		"NUL",
+		"CONIN$",
+		"CONOUT$",
+		"CLOCK$",
+		...Array.from({ length: 9 }, (_, i) => `COM${i + 1}`),
+		...Array.from({ length: 9 }, (_, i) => `LPT${i + 1}`),
+	];
+	const invalid: unknown[] = [
+		undefined,
+		null,
+		false,
+		42,
+		{},
+		[],
+		"",
+		".",
+		"..",
+		"../escape",
+		"..\\escape",
+		"a/../../b",
+		"/absolute",
+		"C:\\memory",
+		"C:memory",
+		"\\\\server\\share",
+		"~/memory",
+		"a/b",
+		"a\\b",
+		".git",
+		".GIT",
+		".hg",
+		".svn",
+		".bzr",
+		".jj",
+		".sl",
+		"memory.",
+		"memory ",
+		" memory",
+		"a\0b",
+		"a\nb",
+		"a\tb",
+		"memory\n",
+		"memory\r",
+		"a:b",
+		"a*b",
+		"a?b",
+		"a|b",
+		'a"b',
+		"a<b",
+		"a>b",
+		"a".repeat(256),
+		"COM\u00b9",
+		"LPT\u00b2",
+		"\uFF0Egit",
+		...reserved.flatMap((name) => [name, `${name.toLowerCase()}.txt`]),
+	];
+	for (const name of invalid)
+		assert.deepEqual(await resolveProjectPaths(root, null, true, name as string), defaults, String(name));
+	for (const name of [".em", "memory", "project-memory", "memory_v2", "Memory.2"]) {
+		const paths = await resolveProjectPaths(root, null, true, name);
+		assert.equal(paths.memoryDir, join(defaults.projectRoot, name, "memory"));
+		assert.equal(paths.baseDir, join(defaults.projectRoot, name, "memory-state"));
+	}
+});
+
+test("container configuration has no effect outside local storage mode", async (t) => {
+	const root = await createTempDirectory(t, "pi-memory-nonlocal-container-");
+	for (const override of [null, join(root, "custom-memory")]) {
+		const defaults = await resolveProjectPaths(root, override);
+		assert.deepEqual(await resolveProjectPaths(root, override, false, ".em"), defaults);
+		assert.deepEqual(await resolveProjectPaths(root, override, false, "../escape"), defaults);
+	}
+});
+
 test("default and explicitly equivalent memory roots share coordination paths", async (t) => {
 	const root = await createTempDirectory(t, "pi-memory-default-coordination-");
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -208,6 +324,13 @@ test("linked worktrees use the common checkout as the Claude-compatible root", a
 	assert.equal(await readFile(marker, "utf8"), "ran\n");
 	assert.equal(linkedPaths.projectRoot, mainPaths.projectRoot);
 	assert.equal(linkedPaths.baseDir, mainPaths.baseDir);
+	for (const container of [undefined, ".em"]) {
+		const mainLocal = await resolveProjectPaths(main, null, true, container);
+		const linkedLocal = await resolveProjectPaths(linked, join(root, "ignored"), true, container);
+		assert.deepEqual(linkedLocal, mainLocal);
+		assert.equal(mainLocal.memoryDir, join(await realpath(main), container ?? ".pi", "memory"));
+		assert.equal(mainLocal.baseDir, join(await realpath(main), container ?? ".pi", "memory-state"));
+	}
 });
 
 test("project path initialization keeps existing permissions and accepts a symlink memory root", async (t) => {
