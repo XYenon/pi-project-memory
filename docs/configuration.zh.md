@@ -32,14 +32,18 @@
   - 如果 `models`、`extraction`、`dream` 或某个角色配置对象不是普通对象，对应子块回退为该子块的默认值。
   - 每个具体字段独立校验：只有当该字段缺失、类型不匹配、格式不合法或超出允许的整数范围时，**该字段自身**才会回退到内置默认值，同一对象内其他合法的兄弟字段不受影响。未知的多余字段会被忽略。
 
+未知的多余配置字段会被忽略。
+
 ### 3. 配置重载（`/memory reload-config`）的生效边界
+
+`useProjectMemory` 与 `projectMemoryDirectory` 选择项目本地存储。两者与 `autoMemoryDirectory` 一样在下次会话启动时生效；修改它们不会迁移已有文件。
 
 运行 `/memory reload-config` 时：
 
 - `enabled`、`models.*`、`extraction.*` 和 `dream.*` 的修改会**立即生效**。
 - 如果重开或维持了 `enabled: true`，扩展会立即中止当前正在运行的后台提取或整理子任务（通过递增 `generation` 并触发 `AbortController`），并取消正在等待的预取和空闲计时器。
 - 如果将 `enabled` 从 `true` 改为 `false`，扩展会中止后台任务、清空内存中的路径引用与待发送更新；如果将 `enabled` 从 `false` 改为 `true`，则会按当前会话固定的目录配置初始化记忆目录。
-- `autoMemoryDirectory` 在每次会话启动（`session_start`）时会被固定到 `sessionMemoryDirectory`。在会话运行期间修改 `autoMemoryDirectory` 并执行 `/memory reload-config` **不会**切换当前会话的记忆目录，也不会迁移已有文件；命令会提示该改动将在下次会话启动后生效。
+- `autoMemoryDirectory`、`useProjectMemory` 与 `projectMemoryDirectory` 在每次会话启动（`session_start`）时固定，包括扩展以禁用状态启动的情况。重载配置或禁用/重新启用扩展**不会**把当前会话切换到其他存储根，已有文件也不会被搬移；命令会提示哪些路径变更需要新会话。
 
 ## 配置字段总表
 
@@ -49,6 +53,8 @@
 | ---------------------------------- | --------------------- | ----------- | -------------------------------------------------------------------------------------------------- | ----------------------- | --------------------------------------------------------------- |
 | `enabled`                          | `boolean`             | `true`      | `true` 或 `false`（非布尔值回退为 `true`）                                                         | 无                      | 扩展全局总开关；关闭时不解析或创建目录，不运行任何自动任务。    |
 | `autoMemoryDirectory`              | `string \| null`      | `null`      | `null`，或合法的绝对路径 / `~/` 开头路径（空白字符串或非法路径回退默认）                           | 无                      | 覆盖项目默认的 `memory/` 存储目录（仅下次会话启动生效）。       |
+| `useProjectMemory`                 | `boolean`             | `false`     | `true` 或 `false`                                                                                  | 无                      | 将记忆存储在规范项目根目录下；优先于 `autoMemoryDirectory`。仅下次会话生效。 |
+| `projectMemoryDirectory`           | `string`              | `".pi"`     | 单个可移植目录名（非法值回退到 `.pi`）                                                             | 无                      | `memory/` 与 `memory-state/` 的项目本地容器，如 `.memory`。仅下次会话生效。 |
 | `models.selector.model`            | `string`              | `"inherit"` | `"inherit"`，或以第一个 `/` 分隔 `provider` 与非空 `model-id` 的字符串（`model-id` 可含 `/`）      | 无                      | Selector（相关记忆挑选）使用的模型。                            |
 | `models.selector.thinkingLevel`    | `string`              | `"off"`     | `"inherit"` \| `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | 无                      | Selector 的思考预算档位（会自动夹紧到模型支持的最接近档位）。   |
 | `models.selector.maxTokens`        | `"inherit" \| number` | `512`       | `"inherit"` 或 不小于 `64` 的安全整数                                                              | 输出 token              | Selector 单次调用的最大输出 token 数。                          |
@@ -95,6 +101,24 @@
      - 展开并去掉末尾斜杠后，字符长度必须至少为 3，且不能是根目录 `/` 或 Windows 盘符根（如 `C:`）。
      - 路径中任何一段目录名（按 `/` 或 `\` 拆分，不区分大小写）不能是版本控制元数据目录：`.git`、`.hg`、`.svn`、`.bzr`、`.jj`、`.sl`。
   3. `initializeProjectPaths()` 阶段：记忆根目录可使用指向有效目录的符号链接；目标为普通文件或悬空链接时初始化失败。项目状态目录和锁目录仍要求真实目录。
+
+#### `useProjectMemory` 与 `projectMemoryDirectory`
+
+- `useProjectMemory` 默认为 `false`。设为 `true` 时，规范项目根目录下使用 `<projectMemoryDirectory>/memory/` 与 `<projectMemoryDirectory>/memory-state/`。默认容器为 `.pi`。主检出与关联的 Git worktree 均使用主检出中的容器。
+- 项目本地模式优先于 `autoMemoryDirectory`。本地模式关闭时，`projectMemoryDirectory` 不产生任何影响。
+- 容器名只能是 1-255 个 ASCII 字母、数字、点、下划线或连字符。空名称、`.`/`..`、末尾点号、含路径分隔符、VCS 元数据目录名（如 `.git`）以及 Windows 保留设备名都会被拒绝。非法值在配置解析与路径解析两个阶段均回退到 `.pi`。
+- 不会自动迁移。修改 `projectMemoryDirectory` 会选择独立的记忆根与状态。如需保留已有记忆，请在使用任一存储根的会话都停止时手动搬移，并保留备份。
+
+例如，将以下字段合并进**用户级** JSON 配置（不要写入项目拥有的配置文件）：
+
+```json
+{
+  "useProjectMemory": true,
+  "projectMemoryDirectory": ".memory"
+}
+```
+
+下次会话启动时即使用 `<canonical-project-root>/.memory/memory/` 与 `.memory/memory-state/`。配置文件本身仍位于 `<agentDir>/project-memory/config.json`。
 
 ### 2. 模型配置（`models`）
 
@@ -153,6 +177,8 @@
 {
   "enabled": true,
   "autoMemoryDirectory": null,
+  "useProjectMemory": false,
+  "projectMemoryDirectory": ".pi",
   "models": {
     "selector": {
       "model": "inherit",
@@ -299,7 +325,12 @@
   - `paths.baseDir` 为 `projects/<namespace>`。
   - `paths.memoryDir` 为 `projects/<namespace>/memory`。
   - `paths.stateFile` 为 `projects/<namespace>/state.json`。
-- **自定义目录模式（`autoMemoryDirectory` 为合法路径）**：
+- **项目本地模式（`useProjectMemory: true`）**：
+  - `paths.memoryDir` 为 `<projectRoot>/<projectMemoryDirectory>/memory`。
+  - `paths.baseDir` 为 `<projectRoot>/<projectMemoryDirectory>/memory-state`，`.project-root` 与 `state.json` 位于该目录。
+  - 该模式优先于 `autoMemoryDirectory`；默认容器为 `.pi`。
+  - 共享锁与 Dream 状态仍位于 agent 目录下并按实际记忆根哈希存放，不会放进项目本地的主题目录。
+- **自定义目录模式（`useProjectMemory: false` 且 `autoMemoryDirectory` 为合法路径）**：
   - `paths.memoryDir` 为展开并规范化后的自定义路径。
   - 扩展会对 `paths.memoryDir` 解析最深已存在祖先的 `realpath` 并做 NFC 归一化，计算 24 位 SHA-256 得到 `<memory-root-hash>`。
   - `paths.baseDir` 为 `projects/<namespace>/stores/<memory-root-hash>`（初始化时会创建该私有目录）。

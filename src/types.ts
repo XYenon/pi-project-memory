@@ -19,6 +19,10 @@ export interface ProjectMemoryConfig {
 	autoMemoryDirectory: string | null;
 	/** Explicit Git Bash path. Invalid values disable background bash instead of falling through. */
 	shellPath: string | null;
+	/** Opt-in project-local Markdown memory storage at <root>/<projectMemoryDirectory>/memory. */
+	useProjectMemory: boolean;
+	/** User-global safe single directory component for local memory and state; defaults to .pi. */
+	projectMemoryDirectory: string;
 	models: {
 		selector: SelectorModelConfig;
 		extractor: RoleModelConfig;

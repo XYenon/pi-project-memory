@@ -1,6 +1,8 @@
 {
   "enabled": true,
   "autoMemoryDirectory": null,
+  "useProjectMemory": false,
+  "projectMemoryDirectory": ".pi",
   "shellPath": null,
   "models": {
     "selector": {

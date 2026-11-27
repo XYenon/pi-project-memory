@@ -95,13 +95,13 @@ pi install .
 
 ## 命令参考
 
-| 命令                          | 用途                                                                                                             |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `/memory` 或 `/memory status` | 在终端中打开记忆面板；RPC 和其他模式保留文本状态报告。                                                           |
-| `/memory list`                | 在终端中打开 Topics，支持搜索和预览；其他模式以文本列出主题类型、路径和描述。                                    |
-| `/memory extract`             | 立即运行一次记忆提取，处理尚未提取的对话内容（即使配置中关闭了自动提取也可手动运行）。                           |
-| `/memory dream`               | 立即运行一次记忆整理与合并。跳过间隔时间和会话数量条件，但仍要求配置中 `dream.enabled` 为 `true`。               |
-| `/memory reload-config`       | 重新加载用户级配置文件。模型、提取和整理参数立即生效；`autoMemoryDirectory` 目录路径变更需在下次启动会话时生效。 |
+| 命令                          | 用途                                                                                               |
+| ----------------------------- | -------------------------------------------------------------------------------------------------- |
+| `/memory` 或 `/memory status` | 在终端中打开记忆面板；RPC 和其他模式保留文本状态报告。                                             |
+| `/memory list`                | 在终端中打开 Topics，支持搜索和预览；其他模式以文本列出主题类型、路径和描述。                      |
+| `/memory extract`             | 立即运行一次记忆提取，处理尚未提取的对话内容（即使配置中关闭了自动提取也可手动运行）。             |
+| `/memory dream`               | 立即运行一次记忆整理与合并。跳过间隔时间和会话数量条件，但仍要求配置中 `dream.enabled` 为 `true`。 |
+| `/memory reload-config`       | 重新加载用户级配置。模型、提取和整理参数立即生效；存储根目录变更需在下次启动会话时生效。           |
 
 Tab 切换页面，在 Topics 中直接输入搜索，Enter 预览，Escape 返回或关闭。子命令支持补全。
 
@@ -120,10 +120,13 @@ mkdir -p ~/.pi/agent/project-memory
 cp config.example.json ~/.pi/agent/project-memory/config.json
 ```
 
+未知的多余字段会被忽略。
+
 最常用的配置项如下：
 
 - `enabled`：扩展总开关（默认 `true`）。设为 `false` 时完全停用扩展，不创建记忆目录，也不发起任何后台模型调用。
 - `autoMemoryDirectory`：自定义记忆文件的保存目录（默认 `null`，支持绝对路径或 `~/` 开头的路径）。只能从用户级配置文件设置，项目仓库内的文件无法覆盖它。
+- `useProjectMemory` 与 `projectMemoryDirectory`：设 `useProjectMemory: true` 后，记忆保存到 `<project-root>/.pi/memory/`；再设 `projectMemoryDirectory: ".memory"` 可改用 `.memory/memory/` 与 `.memory/memory-state/`。存储根变更在下次会话启动时生效，不会搬移已有文件；该模式优先于 `autoMemoryDirectory`。
 - `models.selector`、`models.extractor`、`models.dream`：分别为挑选、提取和整理三个后台任务指定模型（`model`）、思考档位（`thinkingLevel`）和最大输出长度（`maxTokens`）。
 - `extraction`：调整自动提取开关（`enabled`）、每隔多少轮提取一次（`everyNTurns`，默认 `1`）以及空闲触发秒数（`idleFlushSeconds`，默认 `120`）。
 - `dream`：调整定期整理开关（`enabled`）、最短间隔小时数（`minimumHours`，默认 `24`）以及需要累积的其他会话数（`minimumOtherSessions`，默认 `5`）。
@@ -193,7 +196,7 @@ cp config.example.json ~/.pi/agent/project-memory/config.json
 
 ### 修改配置文件后没有生效
 
-保存配置后请运行 `/memory reload-config` 或重启 Pi。注意：如果修改了 `autoMemoryDirectory`，必须启动新的 Pi 会话才会切换到新目录，且扩展不会自动搬移旧目录中的文件。
+保存配置后请运行 `/memory reload-config` 或重启 Pi。注意：如果修改了 `autoMemoryDirectory`、`useProjectMemory` 或 `projectMemoryDirectory`，必须启动新的 Pi 会话才会切换目录，且扩展不会自动搬移已有文件。
 
 ## 文档导航
 

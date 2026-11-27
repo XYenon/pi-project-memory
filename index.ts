@@ -109,6 +109,8 @@ interface RuntimeState {
 	getCodemode: () => ChildCodemodeOptions | undefined;
 	/** Directory configuration is pinned for the whole session, including disabled periods. */
 	sessionMemoryDirectory: string | null;
+	sessionUseProjectMemory: boolean;
+	sessionProjectMemoryDirectory: string;
 	/** Undefined while the global enabled gate is off. No memory directory is resolved or created in that state. */
 	paths?: ProjectPaths;
 	generation: number;
@@ -181,7 +183,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 		return renderMemoryMessage(message, { ...options, outputPad: pi.getSettings().outputPad ?? 1 }, theme);
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		runtime?.maintenanceStatus?.dispose();
 		runtime?.prefetch?.controller.abort();
 		blockedByTrust = !ctx.isProjectTrusted();
@@ -191,6 +193,21 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 			return;
 		}
 		const config = await loadConfig();
+		const pinKey = `${ctx.cwd}\0${ctx.sessionManager.getSessionId()}`;
+		const pins = sessionDirectoryPins();
+		const pin = event.reason === "reload" ? pins.get(pinKey) : undefined;
+		if (pin) Object.assign(config, pin);
+		else {
+			pins.set(pinKey, {
+				autoMemoryDirectory: config.autoMemoryDirectory,
+				useProjectMemory: config.useProjectMemory,
+				projectMemoryDirectory: config.projectMemoryDirectory,
+			});
+			if (pins.size > 128) {
+				const first = pins.keys().next().value;
+				if (first) pins.delete(first);
+			}
+		}
 		const paths = config.enabled ? await initializeRuntimePaths(ctx, config) : undefined;
 		const recalled = await restoreRecalledPaths(ctx, paths?.memoryDir);
 		runtime = {
@@ -201,6 +218,8 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 				return { mode: settings?.mode ?? "on", inlineBudget: settings?.inlineBudget };
 			},
 			sessionMemoryDirectory: config.autoMemoryDirectory,
+			sessionUseProjectMemory: config.useProjectMemory,
+			sessionProjectMemoryDirectory: config.projectMemoryDirectory,
 			paths,
 			generation: 0,
 			cursorEntryId: undefined,
@@ -705,7 +724,12 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 			} catch (error) {
 				return ctx.ui.notify(errorMessage(error), "error");
 			}
-			const deferredDirectoryChange = next.autoMemoryDirectory !== state.sessionMemoryDirectory;
+			const deferredDirectoryChange =
+				next.autoMemoryDirectory !== state.sessionMemoryDirectory ||
+				next.useProjectMemory !== state.sessionUseProjectMemory ||
+				next.projectMemoryDirectory !== state.sessionProjectMemoryDirectory;
+			next.useProjectMemory = state.sessionUseProjectMemory;
+			next.projectMemoryDirectory = state.sessionProjectMemoryDirectory;
 			next.autoMemoryDirectory = state.sessionMemoryDirectory;
 			const enabledPaths = !previous.enabled && next.enabled ? await initializeRuntimePaths(ctx, next) : undefined;
 			cancelRecallPrefetch(state);
@@ -734,7 +758,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 				scheduleIdle(ctx, state);
 			updateMaintenanceStatus(ctx, state);
 			return ctx.ui.notify(
-				`Reloaded ${configPath()}${deferredDirectoryChange ? "; autoMemoryDirectory changes apply after the next session start" : ""}`,
+				`Reloaded ${configPath()}${deferredDirectoryChange ? "; autoMemoryDirectory/useProjectMemory/projectMemoryDirectory changes apply after the next session start" : ""}`,
 				"info",
 			);
 		}
@@ -875,7 +899,12 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 }
 
 async function initializeRuntimePaths(ctx: ExtensionContext, config: ProjectMemoryConfig): Promise<ProjectPaths> {
-	const paths = await resolveProjectPaths(ctx.cwd, config.autoMemoryDirectory);
+	const paths = await resolveProjectPaths(
+		ctx.cwd,
+		config.autoMemoryDirectory,
+		config.useProjectMemory,
+		config.projectMemoryDirectory,
+	);
 	await initializeProjectPaths(paths);
 	return paths;
 }
@@ -1704,4 +1733,12 @@ async function waitWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T | 
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+type DirectoryPin = Pick<ProjectMemoryConfig, "autoMemoryDirectory" | "useProjectMemory" | "projectMemoryDirectory">;
+const DIRECTORY_PINS = Symbol.for("pi-project-memory.sessionDirectoryPins");
+function sessionDirectoryPins(): Map<string, DirectoryPin> {
+	const global = globalThis as typeof globalThis & { [DIRECTORY_PINS]?: Map<string, DirectoryPin> };
+	if (!global[DIRECTORY_PINS]) global[DIRECTORY_PINS] = new Map();
+	return global[DIRECTORY_PINS];
 }

@@ -3,6 +3,101 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { DEFAULT_CONFIG, parseConfig } from "../src/config.ts";
 
+test("parseConfig defaults remain compatible and return independent nested objects", () => {
+	for (const value of [undefined, null, false, [], "config", {}]) {
+		const config = parseConfig(value);
+		assert.deepEqual(config, DEFAULT_CONFIG);
+		assert.equal(config.useProjectMemory, false);
+		assert.equal(config.projectMemoryDirectory, ".pi");
+		config.models.selector.model = "test/changed";
+		assert.equal(DEFAULT_CONFIG.models.selector.model, "inherit");
+		assert.equal(parseConfig(value).models.selector.model, "inherit");
+	}
+});
+
+test("parseConfig ignores unknown fields", () => {
+	for (const legacy of [true, false, null, [], {}, { enabled: true }, { enabled: "true" }]) {
+		const config = parseConfig({ legacy, unknownField: "ignored", projectMemoryDirectory: ".em" });
+		assert.deepEqual(config, { ...DEFAULT_CONFIG, projectMemoryDirectory: ".em" });
+		assert.equal(Object.hasOwn(config, "legacy"), false);
+	}
+});
+
+test("parseConfig accepts safe project-local container names without enabling local storage", () => {
+	for (const name of [".pi", ".em", "memory", "project-memory", "memory_v2", "Memory.2", "a".repeat(255)]) {
+		const config = parseConfig({ projectMemoryDirectory: name });
+		assert.equal(config.projectMemoryDirectory, name);
+		assert.equal(config.useProjectMemory, false);
+	}
+	assert.equal(parseConfig({ useProjectMemory: true, projectMemoryDirectory: ".em" }).useProjectMemory, true);
+});
+
+test("parseConfig rejects unsafe or non-portable project-local containers", () => {
+	for (const projectMemoryDirectory of [
+		undefined,
+		null,
+		false,
+		1,
+		{},
+		[],
+		"",
+		".",
+		"..",
+		"../escape",
+		"..\\escape",
+		"/absolute",
+		"C:\\memory",
+		"C:memory",
+		"\\\\server\\share",
+		"~/memory",
+		"a/b",
+		"a\\b",
+		"a/../b",
+		"./.em",
+		".git",
+		".GiT",
+		".hg",
+		".SVN",
+		".bzr",
+		".jj",
+		".sl",
+		".em ",
+		" .em",
+		"memory.",
+		"...",
+		"a\0b",
+		"a\nb",
+		"a\tb",
+		"memory\n",
+		"memory\r",
+		"a:b",
+		"a?b",
+		"a*b",
+		"a|b",
+		'a"b',
+		"a<b",
+		"a>b",
+		"CON",
+		"con.txt",
+		"PRN",
+		"AUX",
+		"NUL",
+		"COM1",
+		"com9.log",
+		"LPT1",
+		"lpt9.txt",
+		"CONIN$",
+		"CONOUT$",
+		"CLOCK$",
+		"COM\u00b9",
+		"LPT\u00b2",
+		"\uFF0Egit",
+		"a".repeat(256),
+	]) {
+		assert.equal(parseConfig({ projectMemoryDirectory }).projectMemoryDirectory, ".pi", String(projectMemoryDirectory));
+	}
+});
+
 test("parseConfig accepts independent role models", () => {
 	const config = parseConfig({
 		models: {
